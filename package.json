@@ -1,0 +1,16 @@
+{
+  "name": "moonshot-tycoon",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Krypto-Trading Spiel für Telegram",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "node --watch main.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.15.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "node-fetch": "^3.3.2"
+  }
+}
