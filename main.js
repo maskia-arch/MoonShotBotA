@@ -1,4 +1,4 @@
-// main.js - V0.23 - FIX für 409 Conflict + Graceful Shutdown
+// main.js - V0.23.1 - MIT DEBUG-COMMAND
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -13,7 +13,7 @@ import { showAchievements } from './commands/achievements.js';
 import { startGlobalScheduler, stopAllSchedulers } from './core/scheduler.js';
 import { getVersion } from './utils/versionLoader.js';
 import { mainKeyboard } from './ui/buttons.js';
-import { updateMarketPrices } from './logic/market.js';
+import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus } from './logic/market.js';
 
 if (!CONFIG.TELEGRAM_TOKEN) {
     logger.error("BOT_TOKEN fehlt!");
@@ -23,14 +23,13 @@ if (!CONFIG.TELEGRAM_TOKEN) {
 const bot = new Telegraf(CONFIG.TELEGRAM_TOKEN);
 bot.use(session());
 
-// === GLOBALE STATE FÜR SHUTDOWN ===
 let isShuttingDown = false;
 let server = null;
 
-// === ZENTRALER INTERFACE HANDLER ===
+// === INTERFACE HANDLER ===
 bot.use(async (ctx, next) => {
     if (isShuttingDown) {
-        logger.warn("Bot ist im Shutdown-Modus, ignoriere neue Requests");
+        logger.warn("Bot ist im Shutdown-Modus");
         return;
     }
 
@@ -48,7 +47,6 @@ bot.use(async (ctx, next) => {
                     }
                 );
             } catch (e) {
-                // Nachricht existiert nicht mehr oder kann nicht editiert werden
                 try {
                     await ctx.telegram.deleteMessage(ctx.chat.id, lastId).catch(() => {});
                 } catch (delErr) {}
@@ -63,14 +61,14 @@ bot.use(async (ctx, next) => {
             ctx.session.lastMessageId = msg.message_id;
             return msg;
         } catch (e) {
-            logger.error("Interface-Reply fehlgeschlagen:", e);
+            logger.error("Interface-Reply Error:", e);
         }
     };
     
     await next();
 });
 
-// === AUTO-CLEANUP & HANDEL-EINGABE ===
+// === AUTO-CLEANUP ===
 bot.on('text', async (ctx, next) => {
     if (isShuttingDown) return;
 
@@ -86,7 +84,6 @@ bot.on('text', async (ctx, next) => {
     
     if (ctx.message.text.startsWith('/') || menuCommands.includes(ctx.message.text)) {
         delete ctx.session.activeTrade;
-        delete ctx.session.activeLeverage;
         return next();
     }
 
@@ -96,9 +93,7 @@ bot.on('text', async (ctx, next) => {
     const { coinId, type, leverage } = ctx.session.activeTrade;
 
     if (isNaN(amount) || amount <= 0) {
-        const errorMsg = await ctx.reply(
-            `🚨 **Fehler:** Bitte gib eine gültige Anzahl ein.`
-        );
+        const errorMsg = await ctx.reply(`🚨 **Fehler:** Bitte gib eine gültige Anzahl ein.`);
         setTimeout(() => 
             ctx.telegram.deleteMessage(ctx.chat.id, errorMsg.message_id).catch(() => {}), 
             3000
@@ -115,7 +110,6 @@ bot.on('text', async (ctx, next) => {
     }
     
     delete ctx.session.activeTrade;
-    delete ctx.session.activeLeverage;
 });
 
 // === ERROR HANDLING ===
@@ -123,15 +117,13 @@ bot.catch((err, ctx) => {
     if (err.description?.includes("message to delete not found") || 
         err.description?.includes("message is not modified")) return;
     
-    // 409 Conflict speziell behandeln
     if (err.description?.includes("409") || err.description?.includes("Conflict")) {
-        logger.error("🚨 409 CONFLICT DETECTED - Andere Bot-Instanz läuft!");
-        logger.error("   → Bot wird heruntergefahren...");
+        logger.error("🚨 409 CONFLICT!");
         gracefulShutdown('409_conflict');
         return;
     }
     
-    logger.error(`Kritischer Fehler:`, err);
+    logger.error(`Error:`, err);
 });
 
 // === BEFEHLE ===
@@ -139,6 +131,80 @@ bot.command('start', (ctx) => {
     if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return handleStart(ctx);
+});
+
+// NEU: DEBUG-COMMAND (nur für Admins/Entwickler)
+bot.command('debug', async (ctx) => {
+    try {
+        logger.info(`Debug-Command von User ${ctx.from.id}`);
+        
+        // Optional: Nur bestimmte User erlauben
+        // const ADMIN_IDS = [123456789]; // Deine Telegram-ID
+        // if (!ADMIN_IDS.includes(ctx.from.id)) {
+        //     return ctx.reply("⛔ Kein Zugriff");
+        // }
+
+        await ctx.sendChatAction('typing');
+
+        const debugInfo = await getMarketDebugInfo();
+        const status = getMarketUpdateStatus();
+
+        let msg = `🔍 **MARKET DEBUG INFO**\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        msg += `**Status:**\n`;
+        msg += `Updates: ${status.attempts}\n`;
+        msg += `Failures: ${status.consecutiveFailures}\n`;
+        msg += `Letzter Erfolg: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n`;
+        if (status.timeSinceUpdate) {
+            msg += `Alter: ${Math.floor(status.timeSinceUpdate / 1000)}s\n`;
+        }
+        msg += `\n`;
+
+        msg += `**market_cache:**\n`;
+        if (debugInfo.cache && debugInfo.cache.length > 0) {
+            debugInfo.cache.forEach(row => {
+                const age = Math.floor((Date.now() - new Date(row.last_update).getTime()) / 1000);
+                msg += `• ${row.coin_id}: ${row.price_eur}€ (${age}s alt)\n`;
+            });
+        } else {
+            msg += `❌ LEER!\n`;
+        }
+        msg += `\n`;
+
+        msg += `**price_history:**\n`;
+        msg += `Einträge: ${debugInfo.historyEntries || 0}\n`;
+        msg += `\n`;
+
+        msg += `**Bot:**\n`;
+        msg += `Version: ${getVersion()}\n`;
+        msg += `Uptime: ${Math.floor(process.uptime())}s\n`;
+        msg += `Memory: ${Math.floor(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n`;
+        msg += `\n`;
+
+        msg += `**Timestamp:**\n${new Date().toLocaleString('de-DE')}\n`;
+        msg += `\n━━━━━━━━━━━━━━━━━━━━`;
+
+        await ctx.reply(msg, { parse_mode: 'Markdown' });
+
+    } catch (err) {
+        logger.error("Debug-Command Error:", err);
+        await ctx.reply(`❌ Debug Error: ${err.message}`);
+    }
+});
+
+// NEU: FORCE UPDATE COMMAND
+bot.command('forceupdate', async (ctx) => {
+    try {
+        logger.info(`Force-Update von User ${ctx.from.id}`);
+        
+        await ctx.reply("🔄 Force Update läuft...");
+        await updateMarketPrices();
+        await ctx.reply("✅ Update abgeschlossen! Nutze /debug für Details.");
+        
+    } catch (err) {
+        logger.error("Force-Update Error:", err);
+        await ctx.reply(`❌ Update Error: ${err.message}`);
+    }
 });
 
 bot.hears('📈 Trading Center', (ctx) => {
@@ -171,7 +237,7 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACK QUERIES ===
+// === CALLBACKS (wie vorher) ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
         await ctx.answerCbQuery("Bot wird neu gestartet...").catch(() => {});
@@ -181,15 +247,12 @@ bot.on('callback_query', async (ctx) => {
     const action = ctx.callbackQuery.data;
     
     try {
-        // === MENU NAVIGATION ===
         if (action === 'main_menu') {
             delete ctx.session.activeTrade;
-            delete ctx.session.activeLeverage;
-            await ctx.sendInterface("🏠 **Hauptmenü**\nWas möchtest du tun?", mainKeyboard);
+            await ctx.sendInterface("🏠 **Hauptmenü**", mainKeyboard);
             return ctx.answerCbQuery();
         }
 
-        // === TRADING ===
         if (action === 'open_trading_center') {
             delete ctx.session.activeTrade;
             await showTradeMenu(ctx);
@@ -217,64 +280,46 @@ bot.on('callback_query', async (ctx) => {
 
         if (action.startsWith('set_lev_')) {
             const parts = action.split('_');
-            const coinId = parts[2];
-            const leverage = parseInt(parts[3]);
-            await initiateTradeInput(ctx, coinId, 'buy', leverage);
+            await initiateTradeInput(ctx, parts[2], 'buy', parseInt(parts[3]));
             return ctx.answerCbQuery();
         }
 
-        // === KRYPTO-WALLET ===
-        if (action === 'wallet_overview') {
+        if (action === 'wallet_overview' || action === 'refresh_wallet') {
             await showCryptoWallet(ctx);
-            return ctx.answerCbQuery();
-        }
-
-        // FIX: Wallet-Refresh editiert statt neu senden
-        if (action === 'refresh_wallet') {
-            await showCryptoWallet(ctx);
-            return ctx.answerCbQuery('🔄 Aktualisiert!');
+            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄 Aktualisiert!' : '');
         }
 
         if (action.startsWith('wallet_coin_')) {
-            const coinId = action.replace('wallet_coin_', '');
-            await showCoinDetails(ctx, coinId);
+            await showCoinDetails(ctx, action.replace('wallet_coin_', ''));
             return ctx.answerCbQuery();
         }
 
         if (action.startsWith('quick_sell_')) {
             const parts = action.split('_');
-            const coinId = parts[2];
-            const percentage = parseInt(parts[3]);
-            await quickSellFromWallet(ctx, coinId, percentage);
+            await quickSellFromWallet(ctx, parts[2], parseInt(parts[3]));
             return;
         }
 
-        // === IMMOBILIEN ===
         if (action.startsWith('buy_immo_')) {
-            const propId = action.replace('buy_immo_', '');
-            await handleBuyProperty(ctx, propId);
+            await handleBuyProperty(ctx, action.replace('buy_immo_', ''));
             return ctx.answerCbQuery();
         }
 
         if (action.startsWith('info_immo_')) {
-            const propId = action.replace('info_immo_', '');
-            await handlePropertyDetails(ctx, propId);
+            await handlePropertyDetails(ctx, action.replace('info_immo_', ''));
             return ctx.answerCbQuery();
         }
 
         if (action.startsWith('sell_immo_')) {
-            const assetId = parseInt(action.replace('sell_immo_', ''));
-            await handleSellProperty(ctx, assetId);
+            await handleSellProperty(ctx, parseInt(action.replace('sell_immo_', '')));
             return ctx.answerCbQuery();
         }
 
         if (action.startsWith('upgrade_immo_')) {
-            const assetId = parseInt(action.replace('upgrade_immo_', ''));
-            await handleUpgradeProperty(ctx, assetId);
+            await handleUpgradeProperty(ctx, parseInt(action.replace('upgrade_immo_', '')));
             return ctx.answerCbQuery();
         }
 
-        // === PORTFOLIO ===
         if (action === 'view_history') {
             await showTransactionHistory(ctx);
             return ctx.answerCbQuery();
@@ -295,14 +340,11 @@ bot.on('callback_query', async (ctx) => {
             return ctx.answerCbQuery();
         }
 
-        // === LEADERBOARD ===
         if (action.startsWith('rank_')) {
-            const rankType = action.replace('rank_', '');
-            await showLeaderboard(ctx, rankType);
+            await showLeaderboard(ctx, action.replace('rank_', ''));
             return ctx.answerCbQuery();
         }
 
-        // === ACHIEVEMENTS ===
         if (action === 'view_achievements') {
             await showAchievements(ctx);
             return ctx.answerCbQuery();
@@ -312,103 +354,70 @@ bot.on('callback_query', async (ctx) => {
     } catch (err) {
         logger.error("Callback Error:", err);
         try {
-            await ctx.answerCbQuery("❌ Ein Fehler ist aufgetreten.");
+            await ctx.answerCbQuery("❌ Fehler");
         } catch (e) {}
     }
 });
 
 // === GRACEFUL SHUTDOWN ===
 async function gracefulShutdown(reason = 'unknown') {
-    if (isShuttingDown) {
-        logger.warn("Shutdown bereits im Gange...");
-        return;
-    }
-
+    if (isShuttingDown) return;
     isShuttingDown = true;
-    logger.info(`🛑 Graceful Shutdown initiiert (Grund: ${reason})`);
+    
+    logger.info(`🛑 Shutdown (${reason})`);
 
     try {
-        // 1. Stoppe neue Requests
-        logger.info("1️⃣ Stoppe neue Requests...");
-        
-        // 2. Stoppe Scheduler
-        logger.info("2️⃣ Stoppe Scheduler...");
         stopAllSchedulers();
-        
-        // 3. Warte auf laufende Operationen
-        logger.info("3️⃣ Warte auf laufende Operationen...");
         await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // 4. Stoppe Bot
-        logger.info("4️⃣ Stoppe Telegram Bot...");
         await bot.stop(reason);
         
-        // 5. Schließe Server
         if (server) {
-            logger.info("5️⃣ Schließe HTTP Server...");
             await new Promise((resolve) => {
-                server.close(() => {
-                    logger.info("✅ Server geschlossen");
-                    resolve();
-                });
+                server.close(() => resolve());
             });
         }
         
-        logger.info("✅ Graceful Shutdown abgeschlossen");
+        logger.info("✅ Shutdown komplett");
         process.exit(0);
-        
     } catch (err) {
-        logger.error("❌ Fehler beim Shutdown:", err);
+        logger.error("Shutdown Error:", err);
         process.exit(1);
     }
 }
 
-// === LAUNCH mit 409-Prevention ===
+// === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 Starte MoonShot Tycoon Bot...");
-        
-        // WICHTIG: Längere Wartezeit um 409 zu vermeiden
-        logger.info("⏳ Warte 10 Sekunden auf Cleanup alter Instanzen...");
+        logger.info("🚀 Starte MoonShot Tycoon v0.23.1...");
+        logger.info("⏳ Warte 10s auf Cleanup...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
-        logger.info("📡 Starte Bot mit Polling...");
-        
-        // Launch mit explizitem dropPendingUpdates
         await bot.launch({
             dropPendingUpdates: true,
             allowedUpdates: ['message', 'callback_query']
         });
 
-        logger.info("📊 Lade initiale Marktdaten...");
-        await updateMarketPrices().catch(e => 
-            logger.error("Initial-Fetch fehlgeschlagen:", e)
-        );
+        logger.info("📊 Lade Marktdaten...");
+        await updateMarketPrices();
         
-        logger.info("⏰ Starte Scheduler...");
         startGlobalScheduler(bot);
         
-        logger.info(`✅ MoonShot Tycoon v${getVersion()} ONLINE`);
-        logger.info(`🤖 Bot Username: @${bot.botInfo?.username || 'unknown'}`);
+        console.log(`✅ MoonShot Tycoon v${getVersion()} ONLINE`);
+        console.log(`🤖 Bot: @${bot.botInfo?.username || 'unknown'}`);
+        console.log(`💡 Debug: /debug | Force Update: /forceupdate`);
 
     } catch (err) {
-        if (err.description?.includes("409") || err.description?.includes("Conflict")) {
-            logger.error("🚨 409 CONFLICT beim Launch!");
-            logger.error("   Eine andere Instanz läuft noch.");
-            logger.error("   → Warte 30s und versuche erneut...");
-            
+        if (err.description?.includes("409")) {
+            logger.error("🚨 409 CONFLICT - Warte 30s...");
             await new Promise(resolve => setTimeout(resolve, 30000));
-            
-            logger.info("🔄 Retry Launch...");
-            return launch(); // Recursive retry
+            return launch();
         }
-        
-        logger.error("❌ Launch Error:", err);
+        logger.error("Launch Error:", err);
         process.exit(1);
     }
 }
 
-// === HTTP SERVER für Health-Checks ===
+// === HTTP SERVER ===
 const port = CONFIG.PORT || 3000;
 server = http.createServer((req, res) => {
     if (req.url === '/health') {
@@ -420,34 +429,24 @@ server = http.createServer((req, res) => {
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon Bot Running');
+        res.end('MoonShot Tycoon Bot v0.23.1');
     }
 });
 
 server.listen(port, () => {
-    logger.info(`🌐 HTTP Server läuft auf Port ${port}`);
+    logger.info(`🌐 HTTP Server: Port ${port}`);
 });
 
-// === SIGNAL HANDLERS ===
-process.once('SIGINT', () => {
-    logger.info("📡 SIGINT empfangen");
-    gracefulShutdown('SIGINT');
-});
-
-process.once('SIGTERM', () => {
-    logger.info("📡 SIGTERM empfangen");
-    gracefulShutdown('SIGTERM');
-});
-
+// === SIGNALS ===
+process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
     logger.error("💥 Uncaught Exception:", err);
-    gracefulShutdown('uncaught_exception');
+    gracefulShutdown('exception');
 });
-
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     logger.error("💥 Unhandled Rejection:", reason);
-    gracefulShutdown('unhandled_rejection');
+    gracefulShutdown('rejection');
 });
 
-// === START ===
 launch();
