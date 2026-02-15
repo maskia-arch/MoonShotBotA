@@ -1,4 +1,4 @@
-// commands/cryptoWallet.js - NEU für V0.21: Dedizierte Krypto-Wallet
+// commands/cryptoWallet.js - V0.23 - REFRESH EDITIERT STATT NEU SENDEN
 import { supabase } from '../supabase/client.js';
 import { getMarketData } from '../logic/market.js';
 import { logger } from '../utils/logger.js';
@@ -7,7 +7,7 @@ import { Markup } from 'telegraf';
 import { CONFIG } from '../config.js';
 
 /**
- * Zeigt die Krypto-Wallet mit allen Holdings
+ * V0.23: Zeigt Krypto-Wallet (mit Edit beim Refresh!)
  */
 export async function showCryptoWallet(ctx) {
     const userId = ctx.from.id;
@@ -15,7 +15,6 @@ export async function showCryptoWallet(ctx) {
     try {
         await ctx.sendChatAction('typing');
 
-        // User-Kryptos laden
         const { data: cryptos, error } = await supabase
             .from('user_crypto')
             .select('*')
@@ -23,21 +22,20 @@ export async function showCryptoWallet(ctx) {
 
         if (error) throw error;
 
-        // Aktuelle Marktdaten
         const marketData = await getMarketData();
 
         if (!cryptos || cryptos.length === 0) {
-            // Keine Kryptos vorhanden
-            return await ctx.sendInterface(
-                buildEmptyWalletMessage(marketData),
-                buildMarketButtons(marketData)
-            );
+            const message = buildEmptyWalletMessage(marketData);
+            const buttons = buildMarketButtons(marketData);
+            
+            // V0.23: Nutze sendInterface (editiert wenn möglich)
+            return await ctx.sendInterface(message, buttons);
         }
 
-        // Wallet mit Holdings anzeigen
         const message = buildWalletMessage(cryptos, marketData);
         const buttons = buildWalletButtons(cryptos, marketData);
 
+        // V0.23: sendInterface editiert die Nachricht automatisch!
         await ctx.sendInterface(message, buttons);
 
     } catch (err) {
@@ -47,13 +45,12 @@ export async function showCryptoWallet(ctx) {
 }
 
 /**
- * Zeigt Details für einen spezifischen Coin
+ * Zeigt Details für einen Coin
  */
 export async function showCoinDetails(ctx, coinId) {
     const userId = ctx.from.id;
 
     try {
-        // User-Position in diesem Coin
         const { data: position } = await supabase
             .from('user_crypto')
             .select('*')
@@ -61,7 +58,6 @@ export async function showCoinDetails(ctx, coinId) {
             .eq('coin_id', coinId)
             .maybeSingle();
 
-        // Aktueller Marktpreis
         const marketData = await getMarketData();
         const currentPrice = marketData[coinId];
 
@@ -82,7 +78,7 @@ export async function showCoinDetails(ctx, coinId) {
 }
 
 /**
- * Quick-Trade aus der Wallet (Verkauf von 25%, 50%, 100%)
+ * Quick-Sell aus der Wallet
  */
 export async function quickSellFromWallet(ctx, coinId, percentage) {
     const userId = ctx.from.id;
@@ -101,13 +97,12 @@ export async function quickSellFromWallet(ctx, coinId, percentage) {
 
         const sellAmount = position.amount * (percentage / 100);
 
-        // Verkauf durchführen (importiere handleSell)
         const { handleSell } = await import('./trade.js');
         
         await ctx.answerCbQuery(`Verkaufe ${percentage}%...`);
         await handleSell(ctx, coinId, sellAmount);
 
-        // Wallet neu anzeigen
+        // Wallet neu anzeigen (nach 1s)
         setTimeout(() => showCryptoWallet(ctx), 1000);
 
     } catch (err) {
@@ -175,7 +170,6 @@ function buildWalletMessage(cryptos, marketData) {
         msg += `   Ø Kauf: ${formatCurrency(crypto.avg_buy_price)}\n`;
         msg += `   ${pnlColor} PnL: ${formatCurrency(pnl)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)\n`;
 
-        // Liquidations-Warnung bei Hebel
         if (crypto.leverage > 1 && crypto.liquidation_price) {
             const distanceToLiq = ((currentPrice - crypto.liquidation_price) / crypto.liquidation_price) * 100;
             
@@ -252,7 +246,6 @@ Letztes Update: ${new Date(currentPrice.lastUpdate).toLocaleTimeString('de-DE')}
 function buildWalletButtons(cryptos, marketData) {
     const buttons = [];
 
-    // Coin-Buttons (max 6 anzeigen)
     const coinButtons = cryptos.slice(0, 6).map(crypto => {
         const emoji = marketData[crypto.coin_id]?.change24h >= 0 ? '📈' : '📉';
         const leverage = crypto.leverage > 1 ? '🎰' : '';
@@ -263,12 +256,10 @@ function buildWalletButtons(cryptos, marketData) {
         );
     });
 
-    // 2 Buttons pro Zeile
     for (let i = 0; i < coinButtons.length; i += 2) {
         buttons.push(coinButtons.slice(i, i + 2));
     }
 
-    // Action-Buttons
     buttons.push([
         Markup.button.callback('📈 Trading Center', 'open_trading_center'),
         Markup.button.callback('🔄 Aktualisieren', 'refresh_wallet')
@@ -297,7 +288,9 @@ function buildMarketButtons(marketData) {
         ]);
     });
 
-    buttons.push([Markup.button.callback('⬅️ Zurück', 'main_menu')]);
+    buttons.push([
+        Markup.button.callback('⬅️ Zurück', 'main_menu')
+    ]);
 
     return Markup.inlineKeyboard(buttons);
 }
@@ -306,7 +299,6 @@ function buildCoinActionButtons(coinId, position) {
     const buttons = [];
 
     if (position) {
-        // Schnell-Verkauf Buttons
         buttons.push([
             Markup.button.callback('💸 25% verkaufen', `quick_sell_${coinId}_25`),
             Markup.button.callback('💸 50% verkaufen', `quick_sell_${coinId}_50`)
@@ -317,18 +309,15 @@ function buildCoinActionButtons(coinId, position) {
         ]);
 
         if (position.leverage === 1) {
-            // Nur bei nicht-Hebel-Positionen
             buttons.push([
                 Markup.button.callback('🛒 Nachkaufen', `trade_buy_${coinId}`)
             ]);
         } else {
-            // Hebel-Position: Nur schließen möglich
             buttons.push([
                 Markup.button.callback('❌ Position schließen', `quick_sell_${coinId}_100`)
             ]);
         }
     } else {
-        // Keine Position: Kaufen anbieten
         buttons.push([
             Markup.button.callback('🛒 Kaufen', `trade_buy_${coinId}`),
             Markup.button.callback('🎰 Hebel-Trade', `trade_leverage_${coinId}`)

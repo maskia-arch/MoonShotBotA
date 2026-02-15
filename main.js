@@ -1,4 +1,4 @@
-// main.js - AKTUALISIERT für V0.21 mit Krypto-Wallet
+// main.js - V0.23 - FIX für 409 Conflict + Graceful Shutdown
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -7,10 +7,10 @@ import { handleStart } from './commands/start.js';
 import { showTradeMenu, handleBuy, handleSell, initiateTradeInput, handleLeverageTrade } from './commands/trade.js';
 import { showImmoMarket, handleBuyProperty, handlePropertyDetails, handleSellProperty, handleUpgradeProperty } from './commands/immo.js';
 import { showWallet, showTransactionHistory } from './commands/wallet.js';
-import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js'; // NEU
+import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js';
 import { showLeaderboard } from './commands/rank.js';
 import { showAchievements } from './commands/achievements.js';
-import { startGlobalScheduler } from './core/scheduler.js';
+import { startGlobalScheduler, stopAllSchedulers } from './core/scheduler.js';
 import { getVersion } from './utils/versionLoader.js';
 import { mainKeyboard } from './ui/buttons.js';
 import { updateMarketPrices } from './logic/market.js';
@@ -23,8 +23,17 @@ if (!CONFIG.TELEGRAM_TOKEN) {
 const bot = new Telegraf(CONFIG.TELEGRAM_TOKEN);
 bot.use(session());
 
+// === GLOBALE STATE FÜR SHUTDOWN ===
+let isShuttingDown = false;
+let server = null;
+
 // === ZENTRALER INTERFACE HANDLER ===
 bot.use(async (ctx, next) => {
+    if (isShuttingDown) {
+        logger.warn("Bot ist im Shutdown-Modus, ignoriere neue Requests");
+        return;
+    }
+
     if (ctx.from && !ctx.session) ctx.session = {};
 
     ctx.sendInterface = async (text, extra = {}) => {
@@ -39,6 +48,7 @@ bot.use(async (ctx, next) => {
                     }
                 );
             } catch (e) {
+                // Nachricht existiert nicht mehr oder kann nicht editiert werden
                 try {
                     await ctx.telegram.deleteMessage(ctx.chat.id, lastId).catch(() => {});
                 } catch (delErr) {}
@@ -62,6 +72,8 @@ bot.use(async (ctx, next) => {
 
 // === AUTO-CLEANUP & HANDEL-EINGABE ===
 bot.on('text', async (ctx, next) => {
+    if (isShuttingDown) return;
+
     try {
         await ctx.deleteMessage().catch(() => {});
     } catch (e) {}
@@ -110,42 +122,62 @@ bot.on('text', async (ctx, next) => {
 bot.catch((err, ctx) => {
     if (err.description?.includes("message to delete not found") || 
         err.description?.includes("message is not modified")) return;
+    
+    // 409 Conflict speziell behandeln
+    if (err.description?.includes("409") || err.description?.includes("Conflict")) {
+        logger.error("🚨 409 CONFLICT DETECTED - Andere Bot-Instanz läuft!");
+        logger.error("   → Bot wird heruntergefahren...");
+        gracefulShutdown('409_conflict');
+        return;
+    }
+    
     logger.error(`Kritischer Fehler:`, err);
 });
 
 // === BEFEHLE ===
 bot.command('start', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return handleStart(ctx);
 });
 
 bot.hears('📈 Trading Center', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return showTradeMenu(ctx);
 });
 
 bot.hears('💰 Mein Portfolio', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return showWallet(ctx);
 });
 
 bot.hears('🏠 Immobilien', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return showImmoMarket(ctx);
 });
 
 bot.hears('🏆 Bestenliste', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return showLeaderboard(ctx, 'wealth');
 });
 
 bot.hears('⭐ Achievements', (ctx) => {
+    if (isShuttingDown) return;
     delete ctx.session.activeTrade;
     return showAchievements(ctx);
 });
 
 // === CALLBACK QUERIES ===
 bot.on('callback_query', async (ctx) => {
+    if (isShuttingDown) {
+        await ctx.answerCbQuery("Bot wird neu gestartet...").catch(() => {});
+        return;
+    }
+
     const action = ctx.callbackQuery.data;
     
     try {
@@ -191,10 +223,16 @@ bot.on('callback_query', async (ctx) => {
             return ctx.answerCbQuery();
         }
 
-        // === KRYPTO-WALLET (NEU V0.21) ===
-        if (action === 'wallet_overview' || action === 'refresh_wallet') {
+        // === KRYPTO-WALLET ===
+        if (action === 'wallet_overview') {
             await showCryptoWallet(ctx);
-            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄 Aktualisiert!' : '');
+            return ctx.answerCbQuery();
+        }
+
+        // FIX: Wallet-Refresh editiert statt neu senden
+        if (action === 'refresh_wallet') {
+            await showCryptoWallet(ctx);
+            return ctx.answerCbQuery('🔄 Aktualisiert!');
         }
 
         if (action.startsWith('wallet_coin_')) {
@@ -208,7 +246,7 @@ bot.on('callback_query', async (ctx) => {
             const coinId = parts[2];
             const percentage = parseInt(parts[3]);
             await quickSellFromWallet(ctx, coinId, percentage);
-            return; // answerCbQuery ist schon in quickSellFromWallet
+            return;
         }
 
         // === IMMOBILIEN ===
@@ -242,7 +280,6 @@ bot.on('callback_query', async (ctx) => {
             return ctx.answerCbQuery();
         }
 
-        // WICHTIG: V0.21 - "Kryptos" führt zur neuen Wallet!
         if (action === 'port_crypto') {
             await showCryptoWallet(ctx);
             return ctx.answerCbQuery();
@@ -280,40 +317,137 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// === LAUNCH ===
-async function launch() {
+// === GRACEFUL SHUTDOWN ===
+async function gracefulShutdown(reason = 'unknown') {
+    if (isShuttingDown) {
+        logger.warn("Shutdown bereits im Gange...");
+        return;
+    }
+
+    isShuttingDown = true;
+    logger.info(`🛑 Graceful Shutdown initiiert (Grund: ${reason})`);
+
     try {
-        logger.info("Warte auf Cleanup...");
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        await bot.launch({
-            dropPendingUpdates: true
-        });
-
-        logger.info("Lade Marktdaten...");
-        await updateMarketPrices().catch(e => 
-            logger.error("Erster Fetch fehlgeschlagen", e)
-        );
+        // 1. Stoppe neue Requests
+        logger.info("1️⃣ Stoppe neue Requests...");
         
-        startGlobalScheduler(bot);
-        console.log(`🚀 MoonShot Tycoon v${getVersion()} ONLINE`);
-    } catch (err) {
-        if (err.description?.includes("409: Conflict")) {
-            logger.error("Konflikt: Andere Instanz läuft noch.");
-            process.exit(1); 
+        // 2. Stoppe Scheduler
+        logger.info("2️⃣ Stoppe Scheduler...");
+        stopAllSchedulers();
+        
+        // 3. Warte auf laufende Operationen
+        logger.info("3️⃣ Warte auf laufende Operationen...");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // 4. Stoppe Bot
+        logger.info("4️⃣ Stoppe Telegram Bot...");
+        await bot.stop(reason);
+        
+        // 5. Schließe Server
+        if (server) {
+            logger.info("5️⃣ Schließe HTTP Server...");
+            await new Promise((resolve) => {
+                server.close(() => {
+                    logger.info("✅ Server geschlossen");
+                    resolve();
+                });
+            });
         }
-        logger.error("Launch Error:", err);
+        
+        logger.info("✅ Graceful Shutdown abgeschlossen");
+        process.exit(0);
+        
+    } catch (err) {
+        logger.error("❌ Fehler beim Shutdown:", err);
         process.exit(1);
     }
 }
 
+// === LAUNCH mit 409-Prevention ===
+async function launch() {
+    try {
+        logger.info("🚀 Starte MoonShot Tycoon Bot...");
+        
+        // WICHTIG: Längere Wartezeit um 409 zu vermeiden
+        logger.info("⏳ Warte 10 Sekunden auf Cleanup alter Instanzen...");
+        await new Promise(resolve => setTimeout(resolve, 10000));
+
+        logger.info("📡 Starte Bot mit Polling...");
+        
+        // Launch mit explizitem dropPendingUpdates
+        await bot.launch({
+            dropPendingUpdates: true,
+            allowedUpdates: ['message', 'callback_query']
+        });
+
+        logger.info("📊 Lade initiale Marktdaten...");
+        await updateMarketPrices().catch(e => 
+            logger.error("Initial-Fetch fehlgeschlagen:", e)
+        );
+        
+        logger.info("⏰ Starte Scheduler...");
+        startGlobalScheduler(bot);
+        
+        logger.info(`✅ MoonShot Tycoon v${getVersion()} ONLINE`);
+        logger.info(`🤖 Bot Username: @${bot.botInfo?.username || 'unknown'}`);
+
+    } catch (err) {
+        if (err.description?.includes("409") || err.description?.includes("Conflict")) {
+            logger.error("🚨 409 CONFLICT beim Launch!");
+            logger.error("   Eine andere Instanz läuft noch.");
+            logger.error("   → Warte 30s und versuche erneut...");
+            
+            await new Promise(resolve => setTimeout(resolve, 30000));
+            
+            logger.info("🔄 Retry Launch...");
+            return launch(); // Recursive retry
+        }
+        
+        logger.error("❌ Launch Error:", err);
+        process.exit(1);
+    }
+}
+
+// === HTTP SERVER für Health-Checks ===
 const port = CONFIG.PORT || 3000;
-http.createServer((req, res) => { 
-    res.writeHead(200); 
-    res.end('MoonShot Tycoon Bot Running'); 
-}).listen(port);
+server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(isShuttingDown ? 503 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: isShuttingDown ? 'shutting_down' : 'healthy',
+            version: getVersion(),
+            uptime: process.uptime()
+        }));
+    } else {
+        res.writeHead(200);
+        res.end('MoonShot Tycoon Bot Running');
+    }
+});
 
+server.listen(port, () => {
+    logger.info(`🌐 HTTP Server läuft auf Port ${port}`);
+});
+
+// === SIGNAL HANDLERS ===
+process.once('SIGINT', () => {
+    logger.info("📡 SIGINT empfangen");
+    gracefulShutdown('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+    logger.info("📡 SIGTERM empfangen");
+    gracefulShutdown('SIGTERM');
+});
+
+process.on('uncaughtException', (err) => {
+    logger.error("💥 Uncaught Exception:", err);
+    gracefulShutdown('uncaught_exception');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    logger.error("💥 Unhandled Rejection:", reason);
+    gracefulShutdown('unhandled_rejection');
+});
+
+// === START ===
 launch();
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
