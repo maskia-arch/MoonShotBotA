@@ -1,4 +1,4 @@
-// core/scheduler.js - V0.22 - AGGRESSIVER UPDATE-MODE
+// core/scheduler.js - V0.23.3 - GARANTIERT LAUFENDER SCHEDULER
 import { updateMarketPrices, getMarketUpdateStatus } from '../logic/market.js';
 import { runEconomyTick } from '../logic/economy.js';
 import { checkLiquidations } from '../logic/liquidation.js';
@@ -14,118 +14,138 @@ let intervals = {
     healthCheck: null
 };
 
+let isRunning = false;
+
+/**
+ * V0.23.3: ROBUSTER Scheduler der GARANTIERT läuft
+ */
 export function startGlobalScheduler(bot) {
-    logger.info("⏰ Starte Scheduler-System V0.22...");
+    if (isRunning) {
+        logger.warn("⚠️ Scheduler läuft bereits!");
+        return;
+    }
 
-    // === MARKT-UPDATES: Alle 60 Sekunden (AGGRESSIV) ===
-    logger.info("📊 Initialisiere Markt-Update-System...");
+    logger.info("⏰ === STARTE SCHEDULER V0.23.3 ===");
+
+    // === MARKT-UPDATES: Alle 60 Sekunden ===
+    logger.info("📊 Starte Markt-Update-Loop...");
     
-    // Initial-Update SOFORT (mit Retry)
-    performMarketUpdateWithRetry(3);
-
-    // Dann regelmäßig alle 60s
-    intervals.market = setInterval(async () => {
+    // WICHTIG: Wrapper-Funktion für Error-Handling
+    const marketUpdateLoop = async () => {
         try {
+            logger.info(`🔄 [SCHEDULED] Markt-Update getriggert`);
             await updateMarketPrices();
         } catch (err) {
-            logger.error("❌ Scheduler Market-Update Error:", err);
-            // Bei Fehler: Retry nach 10s
-            setTimeout(() => {
-                logger.info("🔄 Retry Market-Update nach Fehler...");
-                updateMarketPrices().catch(e => logger.error("Retry failed:", e));
-            }, 10000);
+            logger.error(`❌ [SCHEDULED] Markt-Update Error: ${err.message}`);
+            // Weiter machen, nicht crashen!
         }
-    }, CONFIG.MARKET_UPDATE_MS || 60000);
+    };
 
-    // === HEALTH-CHECK: Alle 5 Minuten ===
-    intervals.healthCheck = setInterval(() => {
+    // Erster Update SOFORT
+    logger.info("🚀 Starte initialen Markt-Update...");
+    marketUpdateLoop().catch(e => logger.error("Initial-Update Error:", e));
+
+    // Dann regelmäßig alle 60 Sekunden
+    intervals.market = setInterval(marketUpdateLoop, 60000);
+    logger.info("✅ Markt-Interval gesetzt (60s)");
+
+    // === TEST-PING: Alle 30 Sekunden ===
+    // Zeigt dass Scheduler lebt
+    let pingCount = 0;
+    setInterval(() => {
+        pingCount++;
         const status = getMarketUpdateStatus();
         
-        if (!status.lastUpdate) {
-            logger.error("🚨 KRITISCH: Noch NIE ein Update erfolgreich!");
-            performMarketUpdateWithRetry(5);
-        } else {
+        if (status.lastUpdate) {
             const ageMin = Math.floor(status.timeSinceUpdate / 60000);
-            
-            if (ageMin > 10) {
-                logger.error(`🚨 KRITISCH: Letztes Update vor ${ageMin} Minuten!`);
-                logger.error(`   Consecutive Failures: ${status.consecutiveFailures}`);
-                performMarketUpdateWithRetry(3);
-            } else if (ageMin > 5) {
-                logger.warn(`⚠️ Letztes Update vor ${ageMin} Minuten - Check läuft`);
-            } else {
-                logger.debug(`✅ Market-Health OK (${ageMin}min alt)`);
-            }
+            logger.info(`💓 Scheduler ALIVE (Ping #${pingCount}) - Letztes Update: ${ageMin}min alt`);
+        } else {
+            logger.warn(`💓 Scheduler ALIVE (Ping #${pingCount}) - ⚠️ NOCH NIE geupdatet!`);
         }
-    }, 300000); // 5 Min
+    }, 30000);
 
     // === ECONOMY-TICK: Alle 60 Minuten ===
-    logger.info("💰 Starte Economy-Tick (60min)");
+    logger.info("💰 Starte Economy-Tick...");
     intervals.economy = setInterval(async () => {
         try {
+            logger.info("🏠 [SCHEDULED] Economy-Tick...");
             await runEconomyTick();
             logger.info("✅ Economy-Tick done");
         } catch (err) {
             logger.error("❌ Economy-Tick Error:", err);
         }
     }, CONFIG.TICK_SPEED_MS || 3600000);
+    logger.info("✅ Economy-Interval gesetzt (60min)");
 
     // === LIQUIDATIONS: Alle 5 Minuten ===
-    logger.info("🔍 Starte Liquidation-Check (5min)");
+    logger.info("🔍 Starte Liquidation-Check...");
     intervals.liquidation = setInterval(async () => {
         try {
+            logger.info("⚡ [SCHEDULED] Liquidation-Check...");
             await checkLiquidations(bot);
         } catch (err) {
             logger.error("❌ Liquidation-Check Error:", err);
         }
     }, 300000);
+    logger.info("✅ Liquidation-Interval gesetzt (5min)");
 
     // === EVENTS: Alle 30 Minuten ===
-    logger.info("🎲 Starte Event-System (30min)");
+    logger.info("🎲 Starte Event-System...");
     intervals.events = setInterval(async () => {
         try {
+            logger.info("🎰 [SCHEDULED] Event-Trigger...");
             await triggerRandomMarketEvent(bot);
         } catch (err) {
             logger.error("❌ Event-Trigger Error:", err);
         }
     }, CONFIG.EVENT_CHECK_MS || 1800000);
+    logger.info("✅ Event-Interval gesetzt (30min)");
 
-    logger.info("✅ Alle Scheduler gestartet!");
-    logger.info(`📅 Nächstes Market-Update in 60s`);
-    logger.info(`💰 Nächster Economy-Tick in 60min`);
-    logger.info(`🔍 Nächster Liquidation-Check in 5min`);
-}
-
-/**
- * Markt-Update mit automatischen Retries
- */
-async function performMarketUpdateWithRetry(maxRetries = 3) {
-    for (let i = 1; i <= maxRetries; i++) {
-        try {
-            logger.info(`🔄 Market-Update Versuch ${i}/${maxRetries}...`);
-            await updateMarketPrices();
-            logger.info(`✅ Market-Update erfolgreich!`);
-            return true;
-        } catch (err) {
-            logger.error(`❌ Versuch ${i} fehlgeschlagen:`, err.message);
+    // === HEALTH-CHECK: Alle 2 Minuten ===
+    logger.info("🏥 Starte Health-Check...");
+    intervals.healthCheck = setInterval(() => {
+        const status = getMarketUpdateStatus();
+        
+        if (!status.lastUpdate) {
+            logger.error("🚨 KRITISCH: Noch NIE ein Update erfolgreich!");
+            logger.error("   → Versuche Force-Update...");
+            updateMarketPrices().catch(e => logger.error("Force failed:", e));
+        } else {
+            const ageMin = Math.floor(status.timeSinceUpdate / 60000);
             
-            if (i < maxRetries) {
-                const waitMs = i * 5000; // 5s, 10s, 15s...
-                logger.info(`⏳ Warte ${waitMs/1000}s vor nächstem Versuch...`);
-                await new Promise(resolve => setTimeout(resolve, waitMs));
+            if (ageMin > 5) {
+                logger.error(`🚨 KRITISCH: Letztes Update vor ${ageMin} Minuten!`);
+                logger.error(`   Failures: ${status.consecutiveFailures}`);
+                logger.error("   → Triggere Recovery-Update...");
+                updateMarketPrices().catch(e => logger.error("Recovery failed:", e));
+            } else if (ageMin > 2) {
+                logger.warn(`⚠️ Letztes Update vor ${ageMin} Minuten`);
+            } else {
+                logger.debug(`✅ Health OK (${ageMin}min alt)`);
             }
         }
-    }
+        
+        // Log Interval-Status
+        logger.debug(`📊 Intervals: market=${intervals.market !== null}, economy=${intervals.economy !== null}`);
+        
+    }, 120000); // 2 Min
+    logger.info("✅ Health-Check-Interval gesetzt (2min)");
+
+    isRunning = true;
     
-    logger.error(`🚨 Alle ${maxRetries} Versuche fehlgeschlagen!`);
-    return false;
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    logger.info("✅ ALLE SCHEDULER GESTARTET!");
+    logger.info("📊 Markt-Updates: Alle 60s");
+    logger.info("💓 Health-Pings: Alle 30s");
+    logger.info("🏥 Health-Checks: Alle 2min");
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
 /**
- * Stoppt alle Scheduler
+ * Stoppe alle Scheduler
  */
 export function stopAllSchedulers() {
-    logger.info("⏸️ Stoppe alle Scheduler...");
+    logger.info("⏸️ Stoppe Scheduler...");
     
     Object.keys(intervals).forEach(key => {
         if (intervals[key]) {
@@ -134,15 +154,15 @@ export function stopAllSchedulers() {
         }
     });
     
-    logger.info("✅ Alle Scheduler gestoppt");
+    isRunning = false;
+    logger.info("✅ Scheduler gestoppt");
 }
 
 /**
- * Manueller Force-Update
+ * Check ob Scheduler läuft
  */
-export async function forceMarketUpdate() {
-    logger.info("🔄 Manueller Force-Update...");
-    return await performMarketUpdateWithRetry(5);
+export function isSchedulerRunning() {
+    return isRunning;
 }
 
 /**
@@ -152,16 +172,32 @@ export function getSchedulerStatus() {
     const marketStatus = getMarketUpdateStatus();
     
     return {
-        running: Object.values(intervals).some(i => i !== null),
-        market: {
-            active: intervals.market !== null,
+        running: isRunning,
+        intervals: {
+            market: intervals.market !== null,
+            economy: intervals.economy !== null,
+            liquidation: intervals.liquidation !== null,
+            events: intervals.events !== null,
+            healthCheck: intervals.healthCheck !== null
+        },
+        marketUpdates: {
             lastUpdate: marketStatus.lastUpdate,
             attempts: marketStatus.attempts,
-            failures: marketStatus.consecutiveFailures
-        },
-        economy: { active: intervals.economy !== null },
-        liquidation: { active: intervals.liquidation !== null },
-        events: { active: intervals.events !== null },
-        healthCheck: { active: intervals.healthCheck !== null }
+            failures: marketStatus.consecutiveFailures,
+            age: marketStatus.timeSinceUpdate
+        }
     };
+}
+
+/**
+ * Force-Restart des Schedulers (für Recovery)
+ */
+export function restartScheduler(bot) {
+    logger.warn("🔄 RESTART Scheduler...");
+    stopAllSchedulers();
+    
+    setTimeout(() => {
+        logger.info("🔄 Starte Scheduler neu...");
+        startGlobalScheduler(bot);
+    }, 2000);
 }

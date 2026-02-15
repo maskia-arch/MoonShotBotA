@@ -1,4 +1,4 @@
-// main.js - V0.23.2 - CACHE-INVALIDIERUNG
+// main.js - V0.23.3 - MIT SCHEDULER-DIAGNOSTICS
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -10,7 +10,7 @@ import { showWallet, showTransactionHistory } from './commands/wallet.js';
 import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js';
 import { showLeaderboard } from './commands/rank.js';
 import { showAchievements } from './commands/achievements.js';
-import { startGlobalScheduler, stopAllSchedulers } from './core/scheduler.js';
+import { startGlobalScheduler, stopAllSchedulers, getSchedulerStatus, isSchedulerRunning, restartScheduler } from './core/scheduler.js';
 import { getVersion } from './utils/versionLoader.js';
 import { mainKeyboard } from './ui/buttons.js';
 import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus, invalidateCache } from './logic/market.js';
@@ -80,7 +80,6 @@ bot.on('text', async (ctx, next) => {
     
     if (ctx.message.text.startsWith('/') || menuCommands.includes(ctx.message.text)) {
         delete ctx.session.activeTrade;
-        // V0.23.2: Cache invalidieren bei Menu-Wechsel
         invalidateCache();
         return next();
     }
@@ -108,7 +107,6 @@ bot.on('text', async (ctx, next) => {
     }
     
     delete ctx.session.activeTrade;
-    // V0.23.2: Nach Trade Cache invalidieren
     invalidateCache();
 });
 
@@ -134,6 +132,61 @@ bot.command('start', (ctx) => {
     return handleStart(ctx);
 });
 
+// V0.23.3: STATUS-COMMAND - Zeigt Scheduler-Status
+bot.command('status', async (ctx) => {
+    try {
+        await ctx.sendChatAction('typing');
+
+        const schedulerStatus = getSchedulerStatus();
+        const marketStatus = getMarketUpdateStatus();
+
+        let msg = `⚙️ **BOT STATUS** (V0.23.3)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        msg += `**Scheduler:**\n`;
+        msg += `Läuft: ${schedulerStatus.running ? '✅ JA' : '❌ NEIN'}\n`;
+        msg += `\n`;
+
+        msg += `**Intervals:**\n`;
+        msg += `• Markt: ${schedulerStatus.intervals.market ? '✅' : '❌'}\n`;
+        msg += `• Economy: ${schedulerStatus.intervals.economy ? '✅' : '❌'}\n`;
+        msg += `• Liquidation: ${schedulerStatus.intervals.liquidation ? '✅' : '❌'}\n`;
+        msg += `• Events: ${schedulerStatus.intervals.events ? '✅' : '❌'}\n`;
+        msg += `• Health: ${schedulerStatus.intervals.healthCheck ? '✅' : '❌'}\n`;
+        msg += `\n`;
+
+        msg += `**Markt-Updates:**\n`;
+        msg += `Gesamt: ${marketStatus.attempts}\n`;
+        msg += `Failures: ${marketStatus.consecutiveFailures}\n`;
+        
+        if (marketStatus.lastUpdate) {
+            const ageMin = Math.floor(marketStatus.timeSinceUpdate / 60000);
+            const ageSec = Math.floor((marketStatus.timeSinceUpdate % 60000) / 1000);
+            msg += `Letzter: ${marketStatus.lastUpdate.toLocaleTimeString('de-DE')}\n`;
+            msg += `Alter: ${ageMin}min ${ageSec}s\n`;
+            
+            if (ageMin > 2) {
+                msg += `⚠️ **PROBLEM: > 2min alt!**\n`;
+            } else {
+                msg += `✅ OK\n`;
+            }
+        } else {
+            msg += `❌ **NIE erfolgreich!**\n`;
+        }
+        msg += `\n`;
+
+        msg += `**Bot:**\n`;
+        msg += `Version: ${getVersion()}\n`;
+        msg += `Uptime: ${Math.floor(process.uptime() / 60)}min\n`;
+        msg += `\n${new Date().toLocaleString('de-DE')}`;
+
+        await ctx.reply(msg, { parse_mode: 'Markdown' });
+
+    } catch (err) {
+        logger.error("Status Error:", err);
+        await ctx.reply(`❌ ${err.message}`);
+    }
+});
+
 // DEBUG-COMMAND
 bot.command('debug', async (ctx) => {
     try {
@@ -142,7 +195,7 @@ bot.command('debug', async (ctx) => {
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `🔍 **MARKET DEBUG** (V0.23.2)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `🔍 **MARKET DEBUG** (V0.23.3)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Status:**\n`;
         msg += `Updates: ${status.attempts}\n`;
@@ -153,7 +206,6 @@ bot.command('debug', async (ctx) => {
         }
         msg += `\n`;
 
-        // V0.23.2: Cache-Info
         msg += `**Memory Cache:**\n`;
         msg += `Aktiv: ${debugInfo.memoryCacheActive ? 'JA' : 'NEIN'}\n`;
         if (debugInfo.memoryCacheAge) {
@@ -194,24 +246,40 @@ bot.command('debug', async (ctx) => {
 bot.command('forceupdate', async (ctx) => {
     try {
         await ctx.reply("🔄 Force Update...");
-        
-        // V0.23.2: Cache invalidieren VOR Update
         invalidateCache();
-        
         await updateMarketPrices();
-        await ctx.reply("✅ Done! /debug für Details");
-        
+        await ctx.reply("✅ Done! /status oder /debug für Details");
     } catch (err) {
         logger.error("Force-Update Error:", err);
         await ctx.reply(`❌ ${err.message}`);
     }
 });
 
-// V0.23.2: NEU - Cache invalidieren
+// V0.23.3: RESTART SCHEDULER
+bot.command('restartscheduler', async (ctx) => {
+    try {
+        await ctx.reply("🔄 Starte Scheduler neu...");
+        restartScheduler(bot);
+        
+        setTimeout(async () => {
+            const status = getSchedulerStatus();
+            if (status.running) {
+                await ctx.reply("✅ Scheduler läuft wieder!");
+            } else {
+                await ctx.reply("❌ Scheduler-Start fehlgeschlagen!");
+            }
+        }, 3000);
+    } catch (err) {
+        logger.error("Restart Error:", err);
+        await ctx.reply(`❌ ${err.message}`);
+    }
+});
+
+// CLEAR CACHE
 bot.command('clearcache', async (ctx) => {
     try {
         invalidateCache();
-        await ctx.reply("✅ Cache geleert! Nächster Call lädt frische Daten.");
+        await ctx.reply("✅ Cache geleert!");
     } catch (err) {
         await ctx.reply(`❌ ${err.message}`);
     }
@@ -220,7 +288,6 @@ bot.command('clearcache', async (ctx) => {
 bot.hears('📈 Trading Center', (ctx) => {
     if (isShuttingDown) return;
     delete ctx.session.activeTrade;
-    // V0.23.2: Cache invalidieren
     invalidateCache();
     return showTradeMenu(ctx);
 });
@@ -250,7 +317,7 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACKS ===
+// === CALLBACKS (gekürzt - wie vorher) ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
         await ctx.answerCbQuery("Bot restart...").catch(() => {});
@@ -260,7 +327,6 @@ bot.on('callback_query', async (ctx) => {
     const action = ctx.callbackQuery.data;
     
     try {
-        // V0.23.2: Cache bei wichtigen Actions invalidieren
         const cacheInvalidatingActions = [
             'open_trading_center',
             'refresh_wallet',
@@ -270,7 +336,6 @@ bot.on('callback_query', async (ctx) => {
         
         if (cacheInvalidatingActions.includes(action) || action.startsWith('view_coin_')) {
             invalidateCache();
-            logger.debug(`🔄 Cache invalidiert (Action: ${action})`);
         }
 
         if (action === 'main_menu') {
@@ -413,7 +478,7 @@ async function gracefulShutdown(reason = 'unknown') {
 // === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 MoonShot Tycoon v0.23.2...");
+        logger.info("🚀 MoonShot Tycoon v0.23.3...");
         logger.info("⏳ Warte 10s...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
@@ -422,13 +487,25 @@ async function launch() {
             allowedUpdates: ['message', 'callback_query']
         });
 
-        logger.info("📊 Marktdaten...");
+        logger.info("📊 Initial Marktdaten...");
         await updateMarketPrices();
         
+        logger.info("⏰ Starte Scheduler...");
         startGlobalScheduler(bot);
         
+        // V0.23.3: Check nach 30s ob Scheduler läuft
+        setTimeout(() => {
+            if (!isSchedulerRunning()) {
+                logger.error("🚨 KRITISCH: Scheduler läuft NICHT!");
+                logger.error("   → Versuche Neustart...");
+                startGlobalScheduler(bot);
+            } else {
+                logger.info("✅ Scheduler-Check OK");
+            }
+        }, 30000);
+        
         console.log(`✅ v${getVersion()} ONLINE`);
-        console.log(`🔧 /debug | /forceupdate | /clearcache`);
+        console.log(`🔧 /status | /debug | /forceupdate | /restartscheduler`);
 
     } catch (err) {
         if (err.description?.includes("409")) {
@@ -449,11 +526,12 @@ server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             status: isShuttingDown ? 'shutting_down' : 'healthy',
             version: getVersion(),
-            uptime: process.uptime()
+            uptime: process.uptime(),
+            scheduler: isSchedulerRunning()
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon v0.23.2');
+        res.end('MoonShot Tycoon v0.23.3');
     }
 });
 
