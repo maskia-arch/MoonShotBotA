@@ -1,4 +1,4 @@
-// main.js - V0.23.5 - INLINE SCHEDULER (NO IMPORTS!)
+// main.js - V0.23.6 - SUPER SIMPLE AUTO-UPDATE
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -25,108 +25,64 @@ bot.use(session());
 let isShuttingDown = false;
 let server = null;
 
-// === INLINE SCHEDULER STATE ===
-let schedulerTimeouts = {
-    market: null,
-    ping: null
-};
-let schedulerRunning = false;
-let pingCount = 0;
+// === SUPER SIMPLE AUTO-UPDATE STATE ===
+let autoUpdateRunning = false;
+let autoUpdateCount = 0;
 
-// === INLINE MARKET UPDATE LOOP ===
-async function marketUpdateLoop() {
-    if (!schedulerRunning || isShuttingDown) {
-        logger.warn("⏹️ Market-Loop gestoppt");
+// === AUTO-UPDATE LOOP (60s) ===
+async function autoUpdateLoop() {
+    if (!autoUpdateRunning || isShuttingDown) {
+        logger.info("⏹️ Auto-Update gestoppt");
         return;
     }
     
     try {
-        logger.info("🔄 [SCHEDULED] Markt-Update START");
-        await updateMarketPrices();
-        logger.info("✅ [SCHEDULED] Markt-Update DONE");
-    } catch (err) {
-        logger.error(`❌ [SCHEDULED] Error: ${err.message}`);
-    }
-    
-    // REKURSIV - nächster Call in 60s
-    if (schedulerRunning && !isShuttingDown) {
-        schedulerTimeouts.market = setTimeout(marketUpdateLoop, 60000);
-        logger.debug("⏰ Nächster Update in 60s");
-    }
-}
-
-// === INLINE PING LOOP ===
-function healthPingLoop() {
-    if (!schedulerRunning || isShuttingDown) {
-        logger.warn("⏹️ Ping-Loop gestoppt");
-        return;
-    }
-    
-    pingCount++;
-    const status = getMarketUpdateStatus();
-    
-    if (status.lastUpdate) {
-        const ageMin = Math.floor(status.timeSinceUpdate / 60000);
-        const ageSec = Math.floor((status.timeSinceUpdate % 60000) / 1000);
-        logger.info(`💓 PING #${pingCount} - Update: ${ageMin}m ${ageSec}s alt`);
+        autoUpdateCount++;
+        logger.info(`🔄 [AUTO-UPDATE #${autoUpdateCount}] START`);
         
-        // Auto-Recovery bei alten Daten
-        if (ageMin > 5) {
-            logger.error("🚨 RECOVERY: Update zu alt!");
-            updateMarketPrices().catch(e => logger.error("Recovery failed:", e));
-        }
-    } else {
-        logger.warn(`💓 PING #${pingCount} - ⚠️ NIE geupdatet!`);
+        // Das gleiche wie /forceupdate!
+        invalidateCache();
+        await updateMarketPrices();
+        
+        logger.info(`✅ [AUTO-UPDATE #${autoUpdateCount}] DONE`);
+    } catch (err) {
+        logger.error(`❌ [AUTO-UPDATE #${autoUpdateCount}] Error: ${err.message}`);
     }
     
-    // REKURSIV - nächster Ping in 30s
-    if (schedulerRunning && !isShuttingDown) {
-        schedulerTimeouts.ping = setTimeout(healthPingLoop, 30000);
+    // REKURSIV - nächster Update in 60s
+    if (autoUpdateRunning && !isShuttingDown) {
+        setTimeout(autoUpdateLoop, 60000); // 60 Sekunden
+        logger.debug(`⏰ Nächster Auto-Update in 60s`);
     }
 }
 
-// === START SCHEDULER INLINE ===
-function startScheduler() {
-    if (schedulerRunning) {
-        logger.warn("⚠️ Scheduler läuft bereits!");
+// === START AUTO-UPDATE ===
+function startAutoUpdate() {
+    if (autoUpdateRunning) {
+        logger.warn("⚠️ Auto-Update läuft bereits!");
         return;
     }
     
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    logger.info("⏰ STARTE INLINE-SCHEDULER V0.23.5");
+    logger.info("⏰ STARTE AUTO-UPDATE V0.23.6");
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
-    schedulerRunning = true;
-    pingCount = 0;
+    autoUpdateRunning = true;
+    autoUpdateCount = 0;
     
-    // Start Market-Loop SOFORT
-    logger.info("📊 Starte Market-Update-Loop...");
-    marketUpdateLoop();
+    // Start SOFORT
+    logger.info("🚀 Starte Auto-Update-Loop (60s interval)...");
+    autoUpdateLoop();
     
-    // Start Ping-Loop nach 30s
-    logger.info("💓 Starte Ping-Loop (30s delay)...");
-    schedulerTimeouts.ping = setTimeout(healthPingLoop, 30000);
-    
-    logger.info("✅ SCHEDULER GESTARTET!");
+    logger.info("✅ AUTO-UPDATE GESTARTET!");
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
-// === STOP SCHEDULER ===
-function stopScheduler() {
-    logger.info("⏸️ Stoppe Scheduler...");
-    schedulerRunning = false;
-    
-    if (schedulerTimeouts.market) {
-        clearTimeout(schedulerTimeouts.market);
-        schedulerTimeouts.market = null;
-    }
-    
-    if (schedulerTimeouts.ping) {
-        clearTimeout(schedulerTimeouts.ping);
-        schedulerTimeouts.ping = null;
-    }
-    
-    logger.info("✅ Scheduler gestoppt");
+// === STOP AUTO-UPDATE ===
+function stopAutoUpdate() {
+    logger.info("⏸️ Stoppe Auto-Update...");
+    autoUpdateRunning = false;
+    logger.info("✅ Auto-Update gestoppt");
 }
 
 // === INTERFACE HANDLER ===
@@ -235,23 +191,20 @@ bot.command('start', (ctx) => {
     return handleStart(ctx);
 });
 
-// STATUS
+// STATUS (FIX: Kein Markdown für Emojis!)
 bot.command('status', async (ctx) => {
     try {
         const marketStatus = getMarketUpdateStatus();
 
-        let msg = `⚙️ **BOT STATUS** (V0.23.5)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `BOT STATUS V0.23.6\n`;
+        msg += `================================\n\n`;
         
-        msg += `**Scheduler:**\n`;
-        msg += `Läuft: ${schedulerRunning ? '✅ JA' : '❌ NEIN'}\n`;
+        msg += `Auto-Update:\n`;
+        msg += `Status: ${autoUpdateRunning ? 'AKTIV' : 'INAKTIV'}\n`;
+        msg += `Count: ${autoUpdateCount}\n`;
         msg += `\n`;
 
-        msg += `**Timeouts:**\n`;
-        msg += `• Markt: ${schedulerTimeouts.market !== null ? '✅' : '❌'}\n`;
-        msg += `• Ping: ${schedulerTimeouts.ping !== null ? '✅' : '❌'}\n`;
-        msg += `\n`;
-
-        msg += `**Markt-Updates:**\n`;
+        msg += `Markt-Updates:\n`;
         msg += `Gesamt: ${marketStatus.attempts}\n`;
         msg += `Failures: ${marketStatus.consecutiveFailures}\n`;
         
@@ -262,37 +215,39 @@ bot.command('status', async (ctx) => {
             msg += `Alter: ${ageMin}min ${ageSec}s\n`;
             
             if (ageMin > 2) {
-                msg += `⚠️ **PROBLEM: > 2min alt!**\n`;
+                msg += `STATUS: PROBLEM (zu alt)\n`;
             } else {
-                msg += `✅ OK\n`;
+                msg += `STATUS: OK\n`;
             }
         } else {
-            msg += `❌ **NIE erfolgreich!**\n`;
+            msg += `STATUS: NIE erfolgreich\n`;
         }
         msg += `\n`;
 
-        msg += `**Bot:**\n`;
+        msg += `Bot:\n`;
         msg += `Version: ${getVersion()}\n`;
         msg += `Uptime: ${Math.floor(process.uptime() / 60)}min\n`;
         msg += `\n${new Date().toLocaleString('de-DE')}`;
 
-        await ctx.reply(msg, { parse_mode: 'Markdown' });
+        // KEIN parse_mode!
+        await ctx.reply(msg);
 
     } catch (err) {
         logger.error("Status Error:", err);
-        await ctx.reply(`❌ ${err.message}`);
+        await ctx.reply(`Error: ${err.message}`);
     }
 });
 
-// DEBUG
+// DEBUG (FIX: Kein Markdown!)
 bot.command('debug', async (ctx) => {
     try {
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `🔍 **MARKET DEBUG** (V0.23.5)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `MARKET DEBUG V0.23.6\n`;
+        msg += `================================\n\n`;
         
-        msg += `**Status:**\n`;
+        msg += `Status:\n`;
         msg += `Updates: ${status.attempts}\n`;
         msg += `Failures: ${status.consecutiveFailures}\n`;
         msg += `Letzter: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n`;
@@ -301,67 +256,68 @@ bot.command('debug', async (ctx) => {
         }
         msg += `\n`;
 
-        msg += `**Cache:**\n`;
+        msg += `Cache:\n`;
         msg += `Aktiv: ${debugInfo.memoryCacheActive ? 'JA' : 'NEIN'}\n`;
         msg += `\n`;
 
-        msg += `**market_cache:**\n`;
+        msg += `market_cache:\n`;
         if (debugInfo.cache && debugInfo.cache.length > 0) {
             debugInfo.cache.forEach(row => {
                 const age = Math.floor((Date.now() - new Date(row.last_update).getTime()) / 1000);
-                msg += `• ${row.coin_id}: ${row.price_eur}€ (${age}s alt)\n`;
+                msg += `${row.coin_id}: ${row.price_eur} EUR (${age}s alt)\n`;
             });
         } else {
-            msg += `❌ LEER!\n`;
+            msg += `LEER\n`;
         }
         msg += `\n`;
 
-        msg += `History: ${debugInfo.historyEntries || 0}\n`;
-        msg += `${new Date().toLocaleString('de-DE')}`;
+        msg += `History: ${debugInfo.historyEntries || 0} Eintraege\n`;
+        msg += `\n${new Date().toLocaleString('de-DE')}`;
 
-        await ctx.reply(msg, { parse_mode: 'Markdown' });
+        // KEIN parse_mode!
+        await ctx.reply(msg);
 
     } catch (err) {
         logger.error("Debug Error:", err);
-        await ctx.reply(`❌ ${err.message}`);
+        await ctx.reply(`Error: ${err.message}`);
     }
 });
 
 // FORCE UPDATE
 bot.command('forceupdate', async (ctx) => {
     try {
-        await ctx.reply("🔄 Force Update...");
+        await ctx.reply("Force Update laeuft...");
         invalidateCache();
         await updateMarketPrices();
-        await ctx.reply("✅ Done!");
+        await ctx.reply("Done!");
     } catch (err) {
         logger.error("Force-Update Error:", err);
-        await ctx.reply(`❌ ${err.message}`);
+        await ctx.reply(`Error: ${err.message}`);
     }
 });
 
-// RESTART SCHEDULER
-bot.command('restartscheduler', async (ctx) => {
+// RESTART AUTO-UPDATE
+bot.command('restart', async (ctx) => {
     try {
-        await ctx.reply("🔄 Restart...");
-        stopScheduler();
+        await ctx.reply("Restart Auto-Update...");
+        stopAutoUpdate();
         
         setTimeout(() => {
-            startScheduler();
-            ctx.reply("✅ Neu gestartet!");
+            startAutoUpdate();
+            ctx.reply("Neu gestartet!");
         }, 2000);
     } catch (err) {
         logger.error("Restart Error:", err);
-        await ctx.reply(`❌ ${err.message}`);
+        await ctx.reply(`Error: ${err.message}`);
     }
 });
 
 bot.command('clearcache', async (ctx) => {
     try {
         invalidateCache();
-        await ctx.reply("✅ Cache geleert!");
+        await ctx.reply("Cache geleert!");
     } catch (err) {
-        await ctx.reply(`❌ ${err.message}`);
+        await ctx.reply(`Error: ${err.message}`);
     }
 });
 
@@ -397,7 +353,7 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACKS (gekürzt) ===
+// === CALLBACKS (gekürzt - wie vorher) ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
         await ctx.answerCbQuery("Restart...").catch(() => {});
@@ -421,7 +377,7 @@ bot.on('callback_query', async (ctx) => {
         if (action === 'main_menu') {
             delete ctx.session.activeTrade;
             invalidateCache();
-            await ctx.sendInterface("🏠 **Hauptmenü**", mainKeyboard);
+            await ctx.sendInterface("Hauptmenue", mainKeyboard);
             return ctx.answerCbQuery();
         }
 
@@ -456,7 +412,7 @@ bot.on('callback_query', async (ctx) => {
 
         if (action === 'wallet_overview' || action === 'refresh_wallet') {
             await showCryptoWallet(ctx);
-            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄!' : '');
+            return ctx.answerCbQuery(action === 'refresh_wallet' ? 'Aktualisiert!' : '');
         }
 
         if (action.startsWith('wallet_coin_')) {
@@ -524,7 +480,7 @@ bot.on('callback_query', async (ctx) => {
     } catch (err) {
         logger.error("Callback Error:", err);
         try {
-            await ctx.answerCbQuery("❌ Fehler");
+            await ctx.answerCbQuery("Fehler");
         } catch (e) {}
     }
 });
@@ -534,10 +490,10 @@ async function gracefulShutdown(reason = 'unknown') {
     if (isShuttingDown) return;
     isShuttingDown = true;
     
-    logger.info(`🛑 Shutdown (${reason})`);
+    logger.info(`Shutdown (${reason})`);
 
     try {
-        stopScheduler();
+        stopAutoUpdate();
         await new Promise(resolve => setTimeout(resolve, 2000));
         await bot.stop(reason);
         
@@ -547,7 +503,7 @@ async function gracefulShutdown(reason = 'unknown') {
             });
         }
         
-        logger.info("✅ Shutdown komplett");
+        logger.info("Shutdown komplett");
         process.exit(0);
     } catch (err) {
         logger.error("Shutdown Error:", err);
@@ -558,38 +514,28 @@ async function gracefulShutdown(reason = 'unknown') {
 // === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 MoonShot Tycoon v0.23.5 (INLINE SCHEDULER)");
-        logger.info("⏳ Warte 10s...");
+        logger.info("MoonShot Tycoon v0.23.6 (SUPER SIMPLE AUTO-UPDATE)");
+        logger.info("Warte 10s...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
-        logger.info("📡 Starte Bot...");
+        logger.info("Starte Bot...");
         await bot.launch({
             dropPendingUpdates: true,
             allowedUpdates: ['message', 'callback_query']
         });
 
-        logger.info("📊 Initial Marktdaten...");
+        logger.info("Initial Marktdaten...");
         await updateMarketPrices();
         
-        logger.info("⏰ Starte INLINE Scheduler...");
-        startScheduler();
+        logger.info("Starte Auto-Update (60s)...");
+        startAutoUpdate();
         
-        // Check nach 30s
-        setTimeout(() => {
-            if (!schedulerRunning) {
-                logger.error("🚨 Scheduler läuft NICHT! Retry...");
-                startScheduler();
-            } else {
-                logger.info("✅ Scheduler-Check OK");
-            }
-        }, 30000);
-        
-        console.log(`✅ v${getVersion()} ONLINE`);
-        console.log(`🔧 /status | /debug | /forceupdate`);
+        console.log(`v${getVersion()} ONLINE`);
+        console.log(`Commands: /status /debug /forceupdate /restart`);
 
     } catch (err) {
         if (err.description?.includes("409")) {
-            logger.error("🚨 409 - Warte 30s...");
+            logger.error("409 - Warte 30s...");
             await new Promise(resolve => setTimeout(resolve, 30000));
             return launch();
         }
@@ -607,27 +553,27 @@ server = http.createServer((req, res) => {
             status: isShuttingDown ? 'shutting_down' : 'healthy',
             version: getVersion(),
             uptime: process.uptime(),
-            scheduler: schedulerRunning
+            autoUpdate: autoUpdateRunning
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon v0.23.5');
+        res.end('MoonShot Tycoon v0.23.6');
     }
 });
 
 server.listen(port, () => {
-    logger.info(`🌐 Port ${port}`);
+    logger.info(`HTTP Server: Port ${port}`);
 });
 
 // === SIGNALS ===
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-    logger.error("💥 Exception:", err);
+    logger.error("Exception:", err);
     gracefulShutdown('exception');
 });
 process.on('unhandledRejection', (reason) => {
-    logger.error("💥 Rejection:", reason);
+    logger.error("Rejection:", reason);
     gracefulShutdown('rejection');
 });
 
