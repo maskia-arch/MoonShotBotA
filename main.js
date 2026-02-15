@@ -1,4 +1,4 @@
-// main.js - Haupt-Bot-Datei mit erweitertem Callback-Handling
+// main.js - AKTUALISIERT für V0.21 mit Krypto-Wallet
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -7,6 +7,7 @@ import { handleStart } from './commands/start.js';
 import { showTradeMenu, handleBuy, handleSell, initiateTradeInput, handleLeverageTrade } from './commands/trade.js';
 import { showImmoMarket, handleBuyProperty, handlePropertyDetails, handleSellProperty, handleUpgradeProperty } from './commands/immo.js';
 import { showWallet, showTransactionHistory } from './commands/wallet.js';
+import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js'; // NEU
 import { showLeaderboard } from './commands/rank.js';
 import { showAchievements } from './commands/achievements.js';
 import { startGlobalScheduler } from './core/scheduler.js';
@@ -190,6 +191,26 @@ bot.on('callback_query', async (ctx) => {
             return ctx.answerCbQuery();
         }
 
+        // === KRYPTO-WALLET (NEU V0.21) ===
+        if (action === 'wallet_overview' || action === 'refresh_wallet') {
+            await showCryptoWallet(ctx);
+            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄 Aktualisiert!' : '');
+        }
+
+        if (action.startsWith('wallet_coin_')) {
+            const coinId = action.replace('wallet_coin_', '');
+            await showCoinDetails(ctx, coinId);
+            return ctx.answerCbQuery();
+        }
+
+        if (action.startsWith('quick_sell_')) {
+            const parts = action.split('_');
+            const coinId = parts[2];
+            const percentage = parseInt(parts[3]);
+            await quickSellFromWallet(ctx, coinId, percentage);
+            return; // answerCbQuery ist schon in quickSellFromWallet
+        }
+
         // === IMMOBILIEN ===
         if (action.startsWith('buy_immo_')) {
             const propId = action.replace('buy_immo_', '');
@@ -221,8 +242,19 @@ bot.on('callback_query', async (ctx) => {
             return ctx.answerCbQuery();
         }
 
-        if (action === 'port_crypto' || action === 'port_immo') {
-            await showWallet(ctx, action.replace('port_', ''));
+        // WICHTIG: V0.21 - "Kryptos" führt zur neuen Wallet!
+        if (action === 'port_crypto') {
+            await showCryptoWallet(ctx);
+            return ctx.answerCbQuery();
+        }
+
+        if (action === 'port_immo') {
+            await showWallet(ctx, 'immo');
+            return ctx.answerCbQuery();
+        }
+
+        if (action === 'port_all') {
+            await showWallet(ctx, 'all');
             return ctx.answerCbQuery();
         }
 
