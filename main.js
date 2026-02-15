@@ -1,4 +1,4 @@
-// main.js - V0.23.3 - MIT SCHEDULER-DIAGNOSTICS
+// main.js - V0.23.4 - MIT TIMEOUT-STATUS
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -132,7 +132,7 @@ bot.command('start', (ctx) => {
     return handleStart(ctx);
 });
 
-// V0.23.3: STATUS-COMMAND - Zeigt Scheduler-Status
+// V0.23.4: STATUS-COMMAND
 bot.command('status', async (ctx) => {
     try {
         await ctx.sendChatAction('typing');
@@ -140,18 +140,20 @@ bot.command('status', async (ctx) => {
         const schedulerStatus = getSchedulerStatus();
         const marketStatus = getMarketUpdateStatus();
 
-        let msg = `⚙️ **BOT STATUS** (V0.23.3)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `⚙️ **BOT STATUS** (V0.23.4)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Scheduler:**\n`;
         msg += `Läuft: ${schedulerStatus.running ? '✅ JA' : '❌ NEIN'}\n`;
         msg += `\n`;
 
-        msg += `**Intervals:**\n`;
-        msg += `• Markt: ${schedulerStatus.intervals.market ? '✅' : '❌'}\n`;
-        msg += `• Economy: ${schedulerStatus.intervals.economy ? '✅' : '❌'}\n`;
-        msg += `• Liquidation: ${schedulerStatus.intervals.liquidation ? '✅' : '❌'}\n`;
-        msg += `• Events: ${schedulerStatus.intervals.events ? '✅' : '❌'}\n`;
-        msg += `• Health: ${schedulerStatus.intervals.healthCheck ? '✅' : '❌'}\n`;
+        // V0.23.4: Timeouts statt Intervals
+        msg += `**Timeouts:**\n`;
+        msg += `• Markt: ${schedulerStatus.timeouts.market ? '✅' : '❌'}\n`;
+        msg += `• Ping: ${schedulerStatus.timeouts.ping ? '✅' : '❌'}\n`;
+        msg += `• Health: ${schedulerStatus.timeouts.healthCheck ? '✅' : '❌'}\n`;
+        msg += `• Economy: ${schedulerStatus.timeouts.economy ? '✅' : '❌'}\n`;
+        msg += `• Liquidation: ${schedulerStatus.timeouts.liquidation ? '✅' : '❌'}\n`;
+        msg += `• Events: ${schedulerStatus.timeouts.events ? '✅' : '❌'}\n`;
         msg += `\n`;
 
         msg += `**Markt-Updates:**\n`;
@@ -187,7 +189,7 @@ bot.command('status', async (ctx) => {
     }
 });
 
-// DEBUG-COMMAND
+// DEBUG
 bot.command('debug', async (ctx) => {
     try {
         await ctx.sendChatAction('typing');
@@ -195,12 +197,12 @@ bot.command('debug', async (ctx) => {
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `🔍 **MARKET DEBUG** (V0.23.3)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `🔍 **MARKET DEBUG** (V0.23.4)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Status:**\n`;
         msg += `Updates: ${status.attempts}\n`;
         msg += `Failures: ${status.consecutiveFailures}\n`;
-        msg += `Letzter Erfolg: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n`;
+        msg += `Letzter: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n`;
         if (status.timeSinceUpdate) {
             msg += `Alter: ${Math.floor(status.timeSinceUpdate / 1000)}s\n`;
         }
@@ -211,7 +213,6 @@ bot.command('debug', async (ctx) => {
         if (debugInfo.memoryCacheAge) {
             msg += `Alter: ${Math.floor(debugInfo.memoryCacheAge / 1000)}s\n`;
         }
-        msg += `TTL: 10s\n`;
         msg += `\n`;
 
         msg += `**market_cache:**\n`;
@@ -229,10 +230,8 @@ bot.command('debug', async (ctx) => {
         msg += `Einträge: ${debugInfo.historyEntries || 0}\n`;
         msg += `\n`;
 
-        msg += `**Bot:**\n`;
         msg += `Version: ${getVersion()}\n`;
-        msg += `Uptime: ${Math.floor(process.uptime())}s\n`;
-        msg += `\n${new Date().toLocaleString('de-DE')}`;
+        msg += `${new Date().toLocaleString('de-DE')}`;
 
         await ctx.reply(msg, { parse_mode: 'Markdown' });
 
@@ -248,14 +247,14 @@ bot.command('forceupdate', async (ctx) => {
         await ctx.reply("🔄 Force Update...");
         invalidateCache();
         await updateMarketPrices();
-        await ctx.reply("✅ Done! /status oder /debug für Details");
+        await ctx.reply("✅ Done! /status für Details");
     } catch (err) {
         logger.error("Force-Update Error:", err);
         await ctx.reply(`❌ ${err.message}`);
     }
 });
 
-// V0.23.3: RESTART SCHEDULER
+// RESTART SCHEDULER
 bot.command('restartscheduler', async (ctx) => {
     try {
         await ctx.reply("🔄 Starte Scheduler neu...");
@@ -266,7 +265,7 @@ bot.command('restartscheduler', async (ctx) => {
             if (status.running) {
                 await ctx.reply("✅ Scheduler läuft wieder!");
             } else {
-                await ctx.reply("❌ Scheduler-Start fehlgeschlagen!");
+                await ctx.reply("❌ Start fehlgeschlagen!");
             }
         }, 3000);
     } catch (err) {
@@ -317,7 +316,7 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACKS (gekürzt - wie vorher) ===
+// === CALLBACKS (gekürzt - wie in V0.23.3) ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
         await ctx.answerCbQuery("Bot restart...").catch(() => {});
@@ -376,7 +375,7 @@ bot.on('callback_query', async (ctx) => {
 
         if (action === 'wallet_overview' || action === 'refresh_wallet') {
             await showCryptoWallet(ctx);
-            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄 Aktualisiert!' : '');
+            return ctx.answerCbQuery(action === 'refresh_wallet' ? '🔄!' : '');
         }
 
         if (action.startsWith('wallet_coin_')) {
@@ -478,7 +477,7 @@ async function gracefulShutdown(reason = 'unknown') {
 // === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 MoonShot Tycoon v0.23.3...");
+        logger.info("🚀 MoonShot Tycoon v0.23.4...");
         logger.info("⏳ Warte 10s...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
@@ -490,15 +489,17 @@ async function launch() {
         logger.info("📊 Initial Marktdaten...");
         await updateMarketPrices();
         
-        logger.info("⏰ Starte Scheduler...");
+        logger.info("⏰ Starte Scheduler (setTimeout)...");
         startGlobalScheduler(bot);
         
-        // V0.23.3: Check nach 30s ob Scheduler läuft
+        // Check nach 30s
         setTimeout(() => {
-            if (!isSchedulerRunning()) {
-                logger.error("🚨 KRITISCH: Scheduler läuft NICHT!");
-                logger.error("   → Versuche Neustart...");
+            const status = getSchedulerStatus();
+            if (!status.running) {
+                logger.error("🚨 Scheduler läuft NICHT!");
                 startGlobalScheduler(bot);
+            } else if (!status.timeouts.market) {
+                logger.error("🚨 Markt-Timeout nicht gesetzt!");
             } else {
                 logger.info("✅ Scheduler-Check OK");
             }
@@ -531,7 +532,7 @@ server = http.createServer((req, res) => {
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon v0.23.3');
+        res.end('MoonShot Tycoon v0.23.4');
     }
 });
 
