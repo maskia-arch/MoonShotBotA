@@ -1,4 +1,4 @@
-// main.js - V0.23.4 - MIT TIMEOUT-STATUS
+// main.js - V0.23.5 - INLINE SCHEDULER (NO IMPORTS!)
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -10,7 +10,6 @@ import { showWallet, showTransactionHistory } from './commands/wallet.js';
 import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js';
 import { showLeaderboard } from './commands/rank.js';
 import { showAchievements } from './commands/achievements.js';
-import { startGlobalScheduler, stopAllSchedulers, getSchedulerStatus, isSchedulerRunning, restartScheduler } from './core/scheduler.js';
 import { getVersion } from './utils/versionLoader.js';
 import { mainKeyboard } from './ui/buttons.js';
 import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus, invalidateCache } from './logic/market.js';
@@ -25,6 +24,110 @@ bot.use(session());
 
 let isShuttingDown = false;
 let server = null;
+
+// === INLINE SCHEDULER STATE ===
+let schedulerTimeouts = {
+    market: null,
+    ping: null
+};
+let schedulerRunning = false;
+let pingCount = 0;
+
+// === INLINE MARKET UPDATE LOOP ===
+async function marketUpdateLoop() {
+    if (!schedulerRunning || isShuttingDown) {
+        logger.warn("⏹️ Market-Loop gestoppt");
+        return;
+    }
+    
+    try {
+        logger.info("🔄 [SCHEDULED] Markt-Update START");
+        await updateMarketPrices();
+        logger.info("✅ [SCHEDULED] Markt-Update DONE");
+    } catch (err) {
+        logger.error(`❌ [SCHEDULED] Error: ${err.message}`);
+    }
+    
+    // REKURSIV - nächster Call in 60s
+    if (schedulerRunning && !isShuttingDown) {
+        schedulerTimeouts.market = setTimeout(marketUpdateLoop, 60000);
+        logger.debug("⏰ Nächster Update in 60s");
+    }
+}
+
+// === INLINE PING LOOP ===
+function healthPingLoop() {
+    if (!schedulerRunning || isShuttingDown) {
+        logger.warn("⏹️ Ping-Loop gestoppt");
+        return;
+    }
+    
+    pingCount++;
+    const status = getMarketUpdateStatus();
+    
+    if (status.lastUpdate) {
+        const ageMin = Math.floor(status.timeSinceUpdate / 60000);
+        const ageSec = Math.floor((status.timeSinceUpdate % 60000) / 1000);
+        logger.info(`💓 PING #${pingCount} - Update: ${ageMin}m ${ageSec}s alt`);
+        
+        // Auto-Recovery bei alten Daten
+        if (ageMin > 5) {
+            logger.error("🚨 RECOVERY: Update zu alt!");
+            updateMarketPrices().catch(e => logger.error("Recovery failed:", e));
+        }
+    } else {
+        logger.warn(`💓 PING #${pingCount} - ⚠️ NIE geupdatet!`);
+    }
+    
+    // REKURSIV - nächster Ping in 30s
+    if (schedulerRunning && !isShuttingDown) {
+        schedulerTimeouts.ping = setTimeout(healthPingLoop, 30000);
+    }
+}
+
+// === START SCHEDULER INLINE ===
+function startScheduler() {
+    if (schedulerRunning) {
+        logger.warn("⚠️ Scheduler läuft bereits!");
+        return;
+    }
+    
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    logger.info("⏰ STARTE INLINE-SCHEDULER V0.23.5");
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    
+    schedulerRunning = true;
+    pingCount = 0;
+    
+    // Start Market-Loop SOFORT
+    logger.info("📊 Starte Market-Update-Loop...");
+    marketUpdateLoop();
+    
+    // Start Ping-Loop nach 30s
+    logger.info("💓 Starte Ping-Loop (30s delay)...");
+    schedulerTimeouts.ping = setTimeout(healthPingLoop, 30000);
+    
+    logger.info("✅ SCHEDULER GESTARTET!");
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+}
+
+// === STOP SCHEDULER ===
+function stopScheduler() {
+    logger.info("⏸️ Stoppe Scheduler...");
+    schedulerRunning = false;
+    
+    if (schedulerTimeouts.market) {
+        clearTimeout(schedulerTimeouts.market);
+        schedulerTimeouts.market = null;
+    }
+    
+    if (schedulerTimeouts.ping) {
+        clearTimeout(schedulerTimeouts.ping);
+        schedulerTimeouts.ping = null;
+    }
+    
+    logger.info("✅ Scheduler gestoppt");
+}
 
 // === INTERFACE HANDLER ===
 bot.use(async (ctx, next) => {
@@ -132,28 +235,20 @@ bot.command('start', (ctx) => {
     return handleStart(ctx);
 });
 
-// V0.23.4: STATUS-COMMAND
+// STATUS
 bot.command('status', async (ctx) => {
     try {
-        await ctx.sendChatAction('typing');
-
-        const schedulerStatus = getSchedulerStatus();
         const marketStatus = getMarketUpdateStatus();
 
-        let msg = `⚙️ **BOT STATUS** (V0.23.4)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `⚙️ **BOT STATUS** (V0.23.5)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Scheduler:**\n`;
-        msg += `Läuft: ${schedulerStatus.running ? '✅ JA' : '❌ NEIN'}\n`;
+        msg += `Läuft: ${schedulerRunning ? '✅ JA' : '❌ NEIN'}\n`;
         msg += `\n`;
 
-        // V0.23.4: Timeouts statt Intervals
         msg += `**Timeouts:**\n`;
-        msg += `• Markt: ${schedulerStatus.timeouts.market ? '✅' : '❌'}\n`;
-        msg += `• Ping: ${schedulerStatus.timeouts.ping ? '✅' : '❌'}\n`;
-        msg += `• Health: ${schedulerStatus.timeouts.healthCheck ? '✅' : '❌'}\n`;
-        msg += `• Economy: ${schedulerStatus.timeouts.economy ? '✅' : '❌'}\n`;
-        msg += `• Liquidation: ${schedulerStatus.timeouts.liquidation ? '✅' : '❌'}\n`;
-        msg += `• Events: ${schedulerStatus.timeouts.events ? '✅' : '❌'}\n`;
+        msg += `• Markt: ${schedulerTimeouts.market !== null ? '✅' : '❌'}\n`;
+        msg += `• Ping: ${schedulerTimeouts.ping !== null ? '✅' : '❌'}\n`;
         msg += `\n`;
 
         msg += `**Markt-Updates:**\n`;
@@ -192,12 +287,10 @@ bot.command('status', async (ctx) => {
 // DEBUG
 bot.command('debug', async (ctx) => {
     try {
-        await ctx.sendChatAction('typing');
-
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `🔍 **MARKET DEBUG** (V0.23.4)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `🔍 **MARKET DEBUG** (V0.23.5)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Status:**\n`;
         msg += `Updates: ${status.attempts}\n`;
@@ -208,11 +301,8 @@ bot.command('debug', async (ctx) => {
         }
         msg += `\n`;
 
-        msg += `**Memory Cache:**\n`;
+        msg += `**Cache:**\n`;
         msg += `Aktiv: ${debugInfo.memoryCacheActive ? 'JA' : 'NEIN'}\n`;
-        if (debugInfo.memoryCacheAge) {
-            msg += `Alter: ${Math.floor(debugInfo.memoryCacheAge / 1000)}s\n`;
-        }
         msg += `\n`;
 
         msg += `**market_cache:**\n`;
@@ -226,11 +316,7 @@ bot.command('debug', async (ctx) => {
         }
         msg += `\n`;
 
-        msg += `**price_history:**\n`;
-        msg += `Einträge: ${debugInfo.historyEntries || 0}\n`;
-        msg += `\n`;
-
-        msg += `Version: ${getVersion()}\n`;
+        msg += `History: ${debugInfo.historyEntries || 0}\n`;
         msg += `${new Date().toLocaleString('de-DE')}`;
 
         await ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -247,7 +333,7 @@ bot.command('forceupdate', async (ctx) => {
         await ctx.reply("🔄 Force Update...");
         invalidateCache();
         await updateMarketPrices();
-        await ctx.reply("✅ Done! /status für Details");
+        await ctx.reply("✅ Done!");
     } catch (err) {
         logger.error("Force-Update Error:", err);
         await ctx.reply(`❌ ${err.message}`);
@@ -257,24 +343,19 @@ bot.command('forceupdate', async (ctx) => {
 // RESTART SCHEDULER
 bot.command('restartscheduler', async (ctx) => {
     try {
-        await ctx.reply("🔄 Starte Scheduler neu...");
-        restartScheduler(bot);
+        await ctx.reply("🔄 Restart...");
+        stopScheduler();
         
-        setTimeout(async () => {
-            const status = getSchedulerStatus();
-            if (status.running) {
-                await ctx.reply("✅ Scheduler läuft wieder!");
-            } else {
-                await ctx.reply("❌ Start fehlgeschlagen!");
-            }
-        }, 3000);
+        setTimeout(() => {
+            startScheduler();
+            ctx.reply("✅ Neu gestartet!");
+        }, 2000);
     } catch (err) {
         logger.error("Restart Error:", err);
         await ctx.reply(`❌ ${err.message}`);
     }
 });
 
-// CLEAR CACHE
 bot.command('clearcache', async (ctx) => {
     try {
         invalidateCache();
@@ -316,10 +397,10 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACKS (gekürzt - wie in V0.23.3) ===
+// === CALLBACKS (gekürzt) ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
-        await ctx.answerCbQuery("Bot restart...").catch(() => {});
+        await ctx.answerCbQuery("Restart...").catch(() => {});
         return;
     }
 
@@ -456,7 +537,7 @@ async function gracefulShutdown(reason = 'unknown') {
     logger.info(`🛑 Shutdown (${reason})`);
 
     try {
-        stopAllSchedulers();
+        stopScheduler();
         await new Promise(resolve => setTimeout(resolve, 2000));
         await bot.stop(reason);
         
@@ -477,10 +558,11 @@ async function gracefulShutdown(reason = 'unknown') {
 // === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 MoonShot Tycoon v0.23.4...");
+        logger.info("🚀 MoonShot Tycoon v0.23.5 (INLINE SCHEDULER)");
         logger.info("⏳ Warte 10s...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
+        logger.info("📡 Starte Bot...");
         await bot.launch({
             dropPendingUpdates: true,
             allowedUpdates: ['message', 'callback_query']
@@ -489,24 +571,21 @@ async function launch() {
         logger.info("📊 Initial Marktdaten...");
         await updateMarketPrices();
         
-        logger.info("⏰ Starte Scheduler (setTimeout)...");
-        startGlobalScheduler(bot);
+        logger.info("⏰ Starte INLINE Scheduler...");
+        startScheduler();
         
         // Check nach 30s
         setTimeout(() => {
-            const status = getSchedulerStatus();
-            if (!status.running) {
-                logger.error("🚨 Scheduler läuft NICHT!");
-                startGlobalScheduler(bot);
-            } else if (!status.timeouts.market) {
-                logger.error("🚨 Markt-Timeout nicht gesetzt!");
+            if (!schedulerRunning) {
+                logger.error("🚨 Scheduler läuft NICHT! Retry...");
+                startScheduler();
             } else {
                 logger.info("✅ Scheduler-Check OK");
             }
         }, 30000);
         
         console.log(`✅ v${getVersion()} ONLINE`);
-        console.log(`🔧 /status | /debug | /forceupdate | /restartscheduler`);
+        console.log(`🔧 /status | /debug | /forceupdate`);
 
     } catch (err) {
         if (err.description?.includes("409")) {
@@ -528,11 +607,11 @@ server = http.createServer((req, res) => {
             status: isShuttingDown ? 'shutting_down' : 'healthy',
             version: getVersion(),
             uptime: process.uptime(),
-            scheduler: isSchedulerRunning()
+            scheduler: schedulerRunning
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon v0.23.4');
+        res.end('MoonShot Tycoon v0.23.5');
     }
 });
 
