@@ -1,4 +1,4 @@
-// commands/trade.js - Erweiterte Trading-Funktionen mit Hebel
+// commands/trade.js - V0.22 - TRANSPARENTE GEBÜHREN
 import { getMarketData, getCoinPrice } from '../logic/market.js';
 import { supabase } from '../supabase/client.js';
 import { tradingViewLayout, leverageWarningLayout, divider } from '../ui/layouts.js';
@@ -10,8 +10,10 @@ import { formatCurrency, formatCrypto } from '../utils/formatter.js';
 import { Markup } from 'telegraf';
 import { CONFIG } from '../config.js';
 
+const TRADING_FEE_PERCENT = "0,5"; // Für Display
+
 /**
- * Zeigt Trading-Center: Coin-Liste oder Detail-Ansicht
+ * Zeigt Trading-Center
  */
 export async function showTradeMenu(ctx, coinId = null) {
     const userId = ctx.from.id;
@@ -26,7 +28,7 @@ export async function showTradeMenu(ctx, coinId = null) {
         }
 
         if (!coinId) {
-            // === COIN-LISTE ===
+            // COIN-LISTE mit Gebühren-Info
             let listMsg = `📊 **Live-Marktübersicht (24h)**\n${divider}\n`;
             
             Object.keys(marketData).forEach(id => {
@@ -36,42 +38,63 @@ export async function showTradeMenu(ctx, coinId = null) {
                 listMsg += `${emoji} **${id.toUpperCase()}**: \`${formatCurrency(c.price)}\` (${trend}${c.change24h.toFixed(2)}%)\n`;
             });
             
-            listMsg += `\n_Wähle einen Coin für Details und Trading._`;
+            // WICHTIG: Gebühren-Info
+            listMsg += `\n${divider}\n💡 **Trading-Gebühr:** ${TRADING_FEE_PERCENT}% pro Trade\n`;
+            listMsg += `_Wähle einen Coin für Details._`;
+            
             return await ctx.sendInterface(listMsg, coinListButtons(marketData));
         }
 
-        // === COIN-DETAILS ===
+        // COIN-DETAILS mit Gebühren-Kalkulation
         const coin = marketData[coinId.toLowerCase()];
         if (!coin) {
             return ctx.answerCbQuery(`❌ ${coinId.toUpperCase()} nicht verfügbar.`);
         }
 
-        const { data: user, error: userError } = await supabase
+        const { data: user } = await supabase
             .from('profiles')
             .select('balance')
             .eq('id', userId)
             .single();
-            
-        if (userError) throw userError;
 
-        const detailMsg = tradingViewLayout({
-            symbol: coinId,
-            price: coin.price,
-            change24h: coin.change24h
-        }, user.balance);
+        // Beispiel-Rechnung für Transparenz
+        const exampleAmount = 1000; // 1000€ Investment
+        const exampleCalc = calculateTrade(exampleAmount / coin.price, coin.price);
+
+        const detailMsg = `
+📊 **${coinId.toUpperCase()}/EUR**
+${divider}
+💰 Aktueller Kurs: ${formatCurrency(coin.price)}
+📈 24h Change: ${coin.change24h >= 0 ? '+' : ''}${coin.change24h.toFixed(2)}%
+
+💶 **Dein Konto:** ${formatCurrency(user.balance)}
+
+${divider}
+💡 **Gebühren-Info:**
+• Trading-Fee: **${TRADING_FEE_PERCENT}%** (Kauf & Verkauf)
+
+**Beispiel-Rechnung (1.000€ Kauf):**
+Bruttokosten: ${formatCurrency(exampleCalc.subtotal)}
++ Gebühr (${TRADING_FEE_PERCENT}%): ${formatCurrency(exampleCalc.fee)}
+= **Gesamt: ${formatCurrency(exampleCalc.totalCost)}**
+
+_Die Gebühren fließen in den Community-Preispool!_
+${divider}
+⚠️ *Hebel-Trades haben höheres Risiko!*
+`;
 
         await ctx.sendInterface(detailMsg, coinActionButtons(coinId));
 
     } catch (err) {
-        logger.error(`Trade-System Fehler:`, err);
+        logger.error(`Trade-System Error:`, err);
         if (ctx.callbackQuery) {
-            ctx.answerCbQuery("🚨 Fehler beim Laden der Marktdaten.");
+            ctx.answerCbQuery("🚨 Fehler beim Laden.");
         }
     }
 }
 
 /**
- * Zeigt Hebel-Auswahl für riskante Trades
+ * Hebel-Menü mit Gebühren-Info
  */
 export async function showLeverageMenu(ctx, coinId) {
     const userId = ctx.from.id;
@@ -84,17 +107,35 @@ export async function showLeverageMenu(ctx, coinId) {
             .eq('id', userId)
             .single();
 
-        const warningMsg = leverageWarningLayout(coinId, coin.price, user.balance);
+        const warningMsg = `
+🎰 **HEBEL-TRADING: ${coinId.toUpperCase()}**
+${divider}
+Aktueller Kurs: ${formatCurrency(coin.price)}
+Verfügbar: ${formatCurrency(user.balance)}
+
+⚠️ **ACHTUNG:**
+• Hebel verstärkt Gewinne UND Verluste!
+• Liquidation = Totalverlust des Einsatzes!
+• Gebühr: ${TRADING_FEE_PERCENT}% auf Einsatz
+
+**Beispiel 10x Hebel:**
+Einsatz: 100€ → Position: 1.000€ Wert
+Bei +10% Kurs: +100€ Gewinn (100%)
+Bei -10% Kurs: **LIQUIDATION** (100% Verlust)
+
+${divider}
+Wähle deinen Hebel:
+`;
         
         await ctx.sendInterface(warningMsg, leverageButtons(coinId));
     } catch (err) {
-        logger.error("Hebel-Menü Fehler:", err);
-        ctx.answerCbQuery("❌ Fehler beim Laden des Hebel-Menüs.");
+        logger.error("Hebel-Menü Error:", err);
+        ctx.answerCbQuery("❌ Fehler beim Laden.");
     }
 }
 
 /**
- * Startet den Eingabe-Modus für normalen Trade oder Hebel-Trade
+ * Trade-Eingabe mit Gebühren-Vorschau
  */
 export async function initiateTradeInput(ctx, coinId, type, leverage = 1) {
     const userId = ctx.from.id;
@@ -131,26 +172,47 @@ export async function initiateTradeInput(ctx, coinId, type, leverage = 1) {
             leverage: leverage || 1
         };
 
-        let actionTitle, limitInfo;
+        let actionTitle, limitInfo, feeInfo;
         
         if (leverage > 1) {
             actionTitle = `🎰 HEBEL-TRADE (${leverage}x)`;
             const maxLeveraged = (user.balance * leverage) / coin.price;
-            limitInfo = `Max. Einsatz: \`${formatCurrency(user.balance)}\`\nMax. Coins (${leverage}x): \`${formatCrypto(maxLeveraged)}\` ${coinId.toUpperCase()}\n\n⚠️ **Liquidation bei ${(100/leverage).toFixed(1)}% Kursverlust!**`;
+            
+            // Gebühren-Kalkulation für Hebel
+            const exampleFee = user.balance * CONFIG.TRADING_FEE;
+            
+            limitInfo = `Max. Einsatz: \`${formatCurrency(user.balance)}\`\nMax. Coins (${leverage}x): \`${formatCrypto(maxLeveraged)}\` ${coinId.toUpperCase()}`;
+            feeInfo = `\n💰 **Gebühr:** ${TRADING_FEE_PERCENT}% auf Einsatz (≈${formatCurrency(exampleFee)})\n⚠️ **Liquidation bei ${(100/leverage).toFixed(1)}% Kursverlust!**`;
         } else {
             actionTitle = type === 'buy' ? '🛒 KAUFEN' : '💰 VERKAUFEN';
-            limitInfo = type === 'buy' 
-                ? `Max. kaufbar: \`${formatCrypto(maxBuy)}\` ${coinId.toUpperCase()}` 
-                : `Verfügbar: \`${formatCrypto(maxSell)}\` ${coinId.toUpperCase()}`;
+            
+            if (type === 'buy') {
+                // Beispiel-Fee für maximalen Kauf
+                const maxBuyCost = maxBuy * coin.price;
+                const maxBuyFee = maxBuyCost * CONFIG.TRADING_FEE;
+                
+                limitInfo = `Max. kaufbar: \`${formatCrypto(maxBuy)}\` ${coinId.toUpperCase()}`;
+                feeInfo = `\n💰 **Gebühr:** ${TRADING_FEE_PERCENT}% (max. ≈${formatCurrency(maxBuyFee)})`;
+            } else {
+                // Verkaufs-Fee
+                const sellValue = userHoldings * coin.price;
+                const sellFee = sellValue * CONFIG.TRADING_FEE;
+                
+                limitInfo = `Verfügbar: \`${formatCrypto(maxSell)}\` ${coinId.toUpperCase()}`;
+                feeInfo = `\n💰 **Gebühr:** ${TRADING_FEE_PERCENT}% (≈${formatCurrency(sellFee)} bei Voll-Verkauf)`;
+            }
         }
 
         const inputMsg = `
 ⌨️ **${actionTitle}: ${coinId.toUpperCase()}**
 ${divider}
 Aktueller Kurs: \`${formatCurrency(coin.price)}\`
-${limitInfo}
+${limitInfo}${feeInfo}
 
+${divider}
 _Bitte sende jetzt die gewünschte Anzahl ${coinId.toUpperCase()} als Nachricht._
+
+**Beispiel:** 0.01 oder 1.5
 `;
 
         await ctx.sendInterface(inputMsg, Markup.inlineKeyboard([
@@ -158,15 +220,15 @@ _Bitte sende jetzt die gewünschte Anzahl ${coinId.toUpperCase()} als Nachricht.
         ]));
         
     } catch (err) {
-        logger.error("Trade-Initialisierung Fehler:", err);
+        logger.error("Trade-Init Error:", err);
         if (ctx.callbackQuery) {
-            ctx.answerCbQuery("🚨 Fehler beim Starten.");
+            ctx.answerCbQuery("🚨 Fehler.");
         }
     }
 }
 
 /**
- * Verarbeitet KAUF ohne Hebel
+ * KAUF mit Gebühren-Anzeige
  */
 export async function handleBuy(ctx, coinId, cryptoAmount) {
     const userId = ctx.from.id;
@@ -175,7 +237,8 @@ export async function handleBuy(ctx, coinId, cryptoAmount) {
         const coin = await getCoinPrice(coinId);
         if (!coin) throw new Error("Preis nicht verfügbar");
 
-        const { totalCost, fee } = calculateTrade(cryptoAmount, coin.price);
+        const { totalCost, fee, subtotal } = calculateTrade(cryptoAmount, coin.price);
+        
         const { data: user } = await supabase
             .from('profiles')
             .select('balance')
@@ -184,7 +247,7 @@ export async function handleBuy(ctx, coinId, cryptoAmount) {
         
         if (user.balance < totalCost) {
             return ctx.reply(
-                `❌ **Guthaben zu niedrig!**\nBedarf: \`${formatCurrency(totalCost)}\``
+                `❌ **Guthaben zu niedrig!**\n\nBenötigt: ${formatCurrency(totalCost)}\n(inkl. ${formatCurrency(fee)} Gebühr)\n\nVerfügbar: ${formatCurrency(user.balance)}`
             );
         }
 
@@ -197,7 +260,7 @@ export async function handleBuy(ctx, coinId, cryptoAmount) {
         
         if (rpcError) throw rpcError;
 
-        // Asset-Bestand aktualisieren
+        // Asset aktualisieren
         const { data: currentAsset } = await supabase
             .from('user_crypto')
             .select('amount, avg_buy_price')
@@ -227,23 +290,34 @@ export async function handleBuy(ctx, coinId, cryptoAmount) {
             `Kauf ${formatCrypto(cryptoAmount, coinId)}`
         );
         
-        // Achievement-Check
         await checkAndAwardAchievement(userId, 'first_trade');
         
-        await ctx.reply(
-            `✅ **Kauf erfolgreich!**\n${formatCrypto(cryptoAmount, coinId)}\nKosten: ${formatCurrency(totalCost)}`
-        );
+        // WICHTIG: Transparente Erfolgs-Nachricht mit Gebühren
+        const successMsg = `
+✅ **Kauf erfolgreich!**
+
+${formatCrypto(cryptoAmount, coinId)}
+
+**Kostenaufstellung:**
+Kaufpreis: ${formatCurrency(subtotal)}
+Gebühr (${TRADING_FEE_PERCENT}%): ${formatCurrency(fee)}
+━━━━━━━━━━━━━━━
+**Gesamt:** ${formatCurrency(totalCost)}
+
+Neues Guthaben: ${formatCurrency(user.balance - totalCost)}
+`;
         
+        await ctx.reply(successMsg);
         return showTradeMenu(ctx, coinId);
         
     } catch (err) {
-        logger.error("Kauf-Fehler:", err);
-        await ctx.reply("🚨 Kauf fehlgeschlagen. Prüfe dein Guthaben.");
+        logger.error("Kauf-Error:", err);
+        await ctx.reply("🚨 Kauf fehlgeschlagen.");
     }
 }
 
 /**
- * Verarbeitet VERKAUF
+ * VERKAUF mit Gebühren-Anzeige
  */
 export async function handleSell(ctx, coinId, cryptoAmount) {
     const userId = ctx.from.id;
@@ -258,11 +332,11 @@ export async function handleSell(ctx, coinId, cryptoAmount) {
             .maybeSingle();
 
         if (!asset || asset.amount < cryptoAmount) {
-            return ctx.reply(`❌ **Bestand zu niedrig!**`);
+            return ctx.reply(`❌ **Bestand zu niedrig!**\n\nVerfügbar: ${asset ? formatCrypto(asset.amount, coinId) : '0'}`);
         }
 
         const isEligible = isTradeEligibleForVolume(asset.created_at);
-        const { payout, fee } = calculateTrade(cryptoAmount, coin.price);
+        const { payout, fee, subtotal } = calculateTrade(cryptoAmount, coin.price);
         const tradeVolumeEuro = cryptoAmount * coin.price;
 
         // RPC: Payout gutschreiben
@@ -292,23 +366,34 @@ export async function handleSell(ctx, coinId, cryptoAmount) {
             `Verkauf ${formatCrypto(cryptoAmount, coinId)}`
         );
         
-        let successMsg = `💰 **Verkauf erfolgreich!**\n+${formatCurrency(payout)}`;
+        // WICHTIG: Transparente Erfolgs-Nachricht
+        let successMsg = `
+💰 **Verkauf erfolgreich!**
+
+${formatCrypto(cryptoAmount, coinId)}
+
+**Auszahlungsdetails:**
+Verkaufswert: ${formatCurrency(subtotal)}
+Gebühr (${TRADING_FEE_PERCENT}%): -${formatCurrency(fee)}
+━━━━━━━━━━━━━━━
+**Auszahlung:** ${formatCurrency(payout)}
+`;
         
         if (!isEligible) {
-            successMsg += `\n\n⚠️ _Haltedauer < 1h: Zählt nicht für Immobilien-Limit._`;
+            successMsg += `\n⚠️ _Haltedauer < 1h: Zählt nicht für Immobilien-Limit._`;
         }
         
         await ctx.reply(successMsg);
         return showTradeMenu(ctx, coinId);
         
     } catch (err) {
-        logger.error("Verkauf-Fehler:", err);
+        logger.error("Verkauf-Error:", err);
         await ctx.reply("🚨 Verkauf fehlgeschlagen.");
     }
 }
 
 /**
- * Verarbeitet HEBEL-TRADE (2x bis 50x)
+ * Hebel-Trade (bereits vollständig implementiert)
  */
 export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
     const userId = ctx.from.id;
@@ -323,20 +408,16 @@ export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
             .eq('id', userId)
             .single();
 
-        // Berechnung: User will X Coins mit Y-fachem Hebel kaufen
-        // Einsatz = (X * Preis) / Hebel
-        // Tatsächliche Coins = X
         const actualCost = (cryptoAmount * coin.price) / leverage;
         const { fee } = calculateTrade(cryptoAmount, coin.price);
         const totalCost = actualCost + fee;
 
         if (user.balance < totalCost) {
             return ctx.reply(
-                `❌ **Guthaben zu niedrig!**\nBedarf: \`${formatCurrency(totalCost)}\``
+                `❌ **Guthaben zu niedrig!**\n\nBedarf: ${formatCurrency(totalCost)}\n(inkl. ${formatCurrency(fee)} Gebühr)`
             );
         }
 
-        // Geld abziehen
         const { error: balError } = await supabase.rpc('execute_trade_buy', {
             p_user_id: userId,
             p_total_cost: totalCost,
@@ -345,7 +426,6 @@ export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
         
         if (balError) throw balError;
 
-        // Hebel-Position eintragen
         const { data: currentAsset } = await supabase
             .from('user_crypto')
             .select('amount, avg_buy_price, leverage')
@@ -355,7 +435,7 @@ export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
 
         if (currentAsset && currentAsset.leverage > 1) {
             return ctx.reply(
-                `⚠️ **Du hast bereits eine Hebel-Position in ${coinId.toUpperCase()}!**\nSchließe diese zuerst.`
+                `⚠️ **Du hast bereits eine Hebel-Position in ${coinId.toUpperCase()}!**\n\nSchließe diese zuerst.`
             );
         }
 
@@ -377,7 +457,6 @@ export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
             `Hebel ${leverage}x: ${formatCrypto(cryptoAmount, coinId)}`
         );
 
-        // Achievement für High Roller
         if (leverage >= 50) {
             await checkAndAwardAchievement(userId, 'high_roller');
         }
@@ -389,18 +468,19 @@ export async function handleLeverageTrade(ctx, coinId, cryptoAmount, leverage) {
 
 📊 ${formatCrypto(cryptoAmount, coinId)}
 💰 Einsatz: ${formatCurrency(actualCost)}
+💸 Gebühr: ${formatCurrency(fee)}
 ⚡ Hebel: ${leverage}x
 📍 Entry: ${formatCurrency(coin.price)}
 💀 Liquidation: ${formatCurrency(liqPrice)}
 
-⚠️ **Achtung:** Fällt der Kurs unter ${formatCurrency(liqPrice)}, verlierst du deinen Einsatz komplett!
+⚠️ **Risiko:** Fällt der Kurs unter ${formatCurrency(liqPrice)}, verlierst du deinen gesamten Einsatz!
 `;
         
         await ctx.reply(successMsg);
         return showTradeMenu(ctx, coinId);
         
     } catch (err) {
-        logger.error("Hebel-Trade Fehler:", err);
+        logger.error("Hebel-Trade Error:", err);
         await ctx.reply("🚨 Hebel-Trade fehlgeschlagen.");
     }
 }
