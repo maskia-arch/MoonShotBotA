@@ -1,4 +1,4 @@
-// main.js - V0.23.1 - MIT DEBUG-COMMAND
+// main.js - V0.23.2 - CACHE-INVALIDIERUNG
 import { Telegraf, session } from 'telegraf';
 import http from 'http'; 
 import { CONFIG } from './config.js';
@@ -13,7 +13,7 @@ import { showAchievements } from './commands/achievements.js';
 import { startGlobalScheduler, stopAllSchedulers } from './core/scheduler.js';
 import { getVersion } from './utils/versionLoader.js';
 import { mainKeyboard } from './ui/buttons.js';
-import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus } from './logic/market.js';
+import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus, invalidateCache } from './logic/market.js';
 
 if (!CONFIG.TELEGRAM_TOKEN) {
     logger.error("BOT_TOKEN fehlt!");
@@ -28,11 +28,7 @@ let server = null;
 
 // === INTERFACE HANDLER ===
 bot.use(async (ctx, next) => {
-    if (isShuttingDown) {
-        logger.warn("Bot ist im Shutdown-Modus");
-        return;
-    }
-
+    if (isShuttingDown) return;
     if (ctx.from && !ctx.session) ctx.session = {};
 
     ctx.sendInterface = async (text, extra = {}) => {
@@ -61,7 +57,7 @@ bot.use(async (ctx, next) => {
             ctx.session.lastMessageId = msg.message_id;
             return msg;
         } catch (e) {
-            logger.error("Interface-Reply Error:", e);
+            logger.error("Interface Error:", e);
         }
     };
     
@@ -79,11 +75,13 @@ bot.on('text', async (ctx, next) => {
     const menuCommands = [
         '📈 Trading Center', '💰 Mein Portfolio', 
         '🏠 Immobilien', '🏆 Bestenliste',
-        '⭐ Achievements', '⚙️ Einstellungen'
+        '⭐ Achievements'
     ];
     
     if (ctx.message.text.startsWith('/') || menuCommands.includes(ctx.message.text)) {
         delete ctx.session.activeTrade;
+        // V0.23.2: Cache invalidieren bei Menu-Wechsel
+        invalidateCache();
         return next();
     }
 
@@ -93,7 +91,7 @@ bot.on('text', async (ctx, next) => {
     const { coinId, type, leverage } = ctx.session.activeTrade;
 
     if (isNaN(amount) || amount <= 0) {
-        const errorMsg = await ctx.reply(`🚨 **Fehler:** Bitte gib eine gültige Anzahl ein.`);
+        const errorMsg = await ctx.reply(`🚨 Ungültige Anzahl`);
         setTimeout(() => 
             ctx.telegram.deleteMessage(ctx.chat.id, errorMsg.message_id).catch(() => {}), 
             3000
@@ -110,6 +108,8 @@ bot.on('text', async (ctx, next) => {
     }
     
     delete ctx.session.activeTrade;
+    // V0.23.2: Nach Trade Cache invalidieren
+    invalidateCache();
 });
 
 // === ERROR HANDLING ===
@@ -117,39 +117,32 @@ bot.catch((err, ctx) => {
     if (err.description?.includes("message to delete not found") || 
         err.description?.includes("message is not modified")) return;
     
-    if (err.description?.includes("409") || err.description?.includes("Conflict")) {
+    if (err.description?.includes("409")) {
         logger.error("🚨 409 CONFLICT!");
-        gracefulShutdown('409_conflict');
+        gracefulShutdown('409');
         return;
     }
     
     logger.error(`Error:`, err);
 });
 
-// === BEFEHLE ===
+// === COMMANDS ===
 bot.command('start', (ctx) => {
     if (isShuttingDown) return;
     delete ctx.session.activeTrade;
+    invalidateCache();
     return handleStart(ctx);
 });
 
-// NEU: DEBUG-COMMAND (nur für Admins/Entwickler)
+// DEBUG-COMMAND
 bot.command('debug', async (ctx) => {
     try {
-        logger.info(`Debug-Command von User ${ctx.from.id}`);
-        
-        // Optional: Nur bestimmte User erlauben
-        // const ADMIN_IDS = [123456789]; // Deine Telegram-ID
-        // if (!ADMIN_IDS.includes(ctx.from.id)) {
-        //     return ctx.reply("⛔ Kein Zugriff");
-        // }
-
         await ctx.sendChatAction('typing');
 
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `🔍 **MARKET DEBUG INFO**\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let msg = `🔍 **MARKET DEBUG** (V0.23.2)\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         msg += `**Status:**\n`;
         msg += `Updates: ${status.attempts}\n`;
@@ -158,6 +151,15 @@ bot.command('debug', async (ctx) => {
         if (status.timeSinceUpdate) {
             msg += `Alter: ${Math.floor(status.timeSinceUpdate / 1000)}s\n`;
         }
+        msg += `\n`;
+
+        // V0.23.2: Cache-Info
+        msg += `**Memory Cache:**\n`;
+        msg += `Aktiv: ${debugInfo.memoryCacheActive ? 'JA' : 'NEIN'}\n`;
+        if (debugInfo.memoryCacheAge) {
+            msg += `Alter: ${Math.floor(debugInfo.memoryCacheAge / 1000)}s\n`;
+        }
+        msg += `TTL: 10s\n`;
         msg += `\n`;
 
         msg += `**market_cache:**\n`;
@@ -178,44 +180,55 @@ bot.command('debug', async (ctx) => {
         msg += `**Bot:**\n`;
         msg += `Version: ${getVersion()}\n`;
         msg += `Uptime: ${Math.floor(process.uptime())}s\n`;
-        msg += `Memory: ${Math.floor(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n`;
-        msg += `\n`;
-
-        msg += `**Timestamp:**\n${new Date().toLocaleString('de-DE')}\n`;
-        msg += `\n━━━━━━━━━━━━━━━━━━━━`;
+        msg += `\n${new Date().toLocaleString('de-DE')}`;
 
         await ctx.reply(msg, { parse_mode: 'Markdown' });
 
     } catch (err) {
-        logger.error("Debug-Command Error:", err);
-        await ctx.reply(`❌ Debug Error: ${err.message}`);
+        logger.error("Debug Error:", err);
+        await ctx.reply(`❌ ${err.message}`);
     }
 });
 
-// NEU: FORCE UPDATE COMMAND
+// FORCE UPDATE
 bot.command('forceupdate', async (ctx) => {
     try {
-        logger.info(`Force-Update von User ${ctx.from.id}`);
+        await ctx.reply("🔄 Force Update...");
         
-        await ctx.reply("🔄 Force Update läuft...");
+        // V0.23.2: Cache invalidieren VOR Update
+        invalidateCache();
+        
         await updateMarketPrices();
-        await ctx.reply("✅ Update abgeschlossen! Nutze /debug für Details.");
+        await ctx.reply("✅ Done! /debug für Details");
         
     } catch (err) {
         logger.error("Force-Update Error:", err);
-        await ctx.reply(`❌ Update Error: ${err.message}`);
+        await ctx.reply(`❌ ${err.message}`);
+    }
+});
+
+// V0.23.2: NEU - Cache invalidieren
+bot.command('clearcache', async (ctx) => {
+    try {
+        invalidateCache();
+        await ctx.reply("✅ Cache geleert! Nächster Call lädt frische Daten.");
+    } catch (err) {
+        await ctx.reply(`❌ ${err.message}`);
     }
 });
 
 bot.hears('📈 Trading Center', (ctx) => {
     if (isShuttingDown) return;
     delete ctx.session.activeTrade;
+    // V0.23.2: Cache invalidieren
+    invalidateCache();
     return showTradeMenu(ctx);
 });
 
 bot.hears('💰 Mein Portfolio', (ctx) => {
     if (isShuttingDown) return;
     delete ctx.session.activeTrade;
+    invalidateCache();
     return showWallet(ctx);
 });
 
@@ -237,18 +250,32 @@ bot.hears('⭐ Achievements', (ctx) => {
     return showAchievements(ctx);
 });
 
-// === CALLBACKS (wie vorher) ===
+// === CALLBACKS ===
 bot.on('callback_query', async (ctx) => {
     if (isShuttingDown) {
-        await ctx.answerCbQuery("Bot wird neu gestartet...").catch(() => {});
+        await ctx.answerCbQuery("Bot restart...").catch(() => {});
         return;
     }
 
     const action = ctx.callbackQuery.data;
     
     try {
+        // V0.23.2: Cache bei wichtigen Actions invalidieren
+        const cacheInvalidatingActions = [
+            'open_trading_center',
+            'refresh_wallet',
+            'port_crypto',
+            'wallet_overview'
+        ];
+        
+        if (cacheInvalidatingActions.includes(action) || action.startsWith('view_coin_')) {
+            invalidateCache();
+            logger.debug(`🔄 Cache invalidiert (Action: ${action})`);
+        }
+
         if (action === 'main_menu') {
             delete ctx.session.activeTrade;
+            invalidateCache();
             await ctx.sendInterface("🏠 **Hauptmenü**", mainKeyboard);
             return ctx.answerCbQuery();
         }
@@ -260,8 +287,7 @@ bot.on('callback_query', async (ctx) => {
         }
         
         if (action.startsWith('view_coin_')) {
-            const coinId = action.split('_')[2];
-            await showTradeMenu(ctx, coinId);
+            await showTradeMenu(ctx, action.split('_')[2]);
             return ctx.answerCbQuery();
         }
 
@@ -272,9 +298,8 @@ bot.on('callback_query', async (ctx) => {
         }
 
         if (action.startsWith('trade_leverage_')) {
-            const coinId = action.replace('trade_leverage_', '');
             const { showLeverageMenu } = await import('./commands/trade.js');
-            await showLeverageMenu(ctx, coinId);
+            await showLeverageMenu(ctx, action.replace('trade_leverage_', ''));
             return ctx.answerCbQuery();
         }
 
@@ -388,8 +413,8 @@ async function gracefulShutdown(reason = 'unknown') {
 // === LAUNCH ===
 async function launch() {
     try {
-        logger.info("🚀 Starte MoonShot Tycoon v0.23.1...");
-        logger.info("⏳ Warte 10s auf Cleanup...");
+        logger.info("🚀 MoonShot Tycoon v0.23.2...");
+        logger.info("⏳ Warte 10s...");
         await new Promise(resolve => setTimeout(resolve, 10000));
 
         await bot.launch({
@@ -397,18 +422,17 @@ async function launch() {
             allowedUpdates: ['message', 'callback_query']
         });
 
-        logger.info("📊 Lade Marktdaten...");
+        logger.info("📊 Marktdaten...");
         await updateMarketPrices();
         
         startGlobalScheduler(bot);
         
-        console.log(`✅ MoonShot Tycoon v${getVersion()} ONLINE`);
-        console.log(`🤖 Bot: @${bot.botInfo?.username || 'unknown'}`);
-        console.log(`💡 Debug: /debug | Force Update: /forceupdate`);
+        console.log(`✅ v${getVersion()} ONLINE`);
+        console.log(`🔧 /debug | /forceupdate | /clearcache`);
 
     } catch (err) {
         if (err.description?.includes("409")) {
-            logger.error("🚨 409 CONFLICT - Warte 30s...");
+            logger.error("🚨 409 - Warte 30s...");
             await new Promise(resolve => setTimeout(resolve, 30000));
             return launch();
         }
@@ -429,23 +453,23 @@ server = http.createServer((req, res) => {
         }));
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon Bot v0.23.1');
+        res.end('MoonShot Tycoon v0.23.2');
     }
 });
 
 server.listen(port, () => {
-    logger.info(`🌐 HTTP Server: Port ${port}`);
+    logger.info(`🌐 Port ${port}`);
 });
 
 // === SIGNALS ===
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-    logger.error("💥 Uncaught Exception:", err);
+    logger.error("💥 Exception:", err);
     gracefulShutdown('exception');
 });
 process.on('unhandledRejection', (reason) => {
-    logger.error("💥 Unhandled Rejection:", reason);
+    logger.error("💥 Rejection:", reason);
     gracefulShutdown('rejection');
 });
 

@@ -1,4 +1,4 @@
-// logic/market.js - V0.23.1 - OHNE RPC, DIREKTES SCHREIBEN
+// logic/market.js - V0.23.2 - GARANTIERT FRISCHE DATEN
 import fetch from 'node-fetch';
 import { supabase } from '../supabase/client.js';
 import { logger } from '../utils/logger.js';
@@ -13,8 +13,13 @@ let lastSuccessfulUpdate = null;
 let updateAttempts = 0;
 let consecutiveFailures = 0;
 
+// V0.23.2: In-Memory Cache mit TTL
+let memoryCache = null;
+let cacheTimestamp = null;
+const CACHE_TTL_MS = 10000; // 10 Sekunden Cache
+
 /**
- * V0.23.1: VEREINFACHT - Direktes Schreiben ohne RPC
+ * V0.23.2: Marktpreise aktualisieren
  */
 export async function updateMarketPrices() {
     updateAttempts++;
@@ -22,31 +27,28 @@ export async function updateMarketPrices() {
     try {
         logger.info(`📊 [Update #${updateAttempts}] START`);
         
-        // === STEP 1: API Call ===
-        logger.info(`   [1/4] Rufe CryptoCompare API...`);
+        // API Call
+        logger.info(`   [1/4] API Call...`);
         const url = `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=BTC,LTC,ETH&tsyms=EUR`;
         const response = await fetch(url, {
-            headers: { 'User-Agent': 'MoonShotBot/0.23.1' },
+            headers: { 'User-Agent': 'MoonShotBot/0.23.2' },
             timeout: 15000
         });
 
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            throw new Error(`HTTP ${response.status}`);
         }
 
         const data = await response.json();
-        logger.info(`   ✅ API Response OK`);
+        logger.info(`   ✅ API OK`);
 
-        if (data.Response === 'Error') {
-            throw new Error(`API Error: ${data.Message}`);
-        }
-
+        if (data.Response === 'Error') throw new Error(`API: ${data.Message}`);
         if (!data.RAW?.BTC?.EUR || !data.RAW?.LTC?.EUR || !data.RAW?.ETH?.EUR) {
-            throw new Error("Unvollständige API-Daten");
+            throw new Error("Unvollständige Daten");
         }
 
-        // === STEP 2: Daten extrahieren ===
-        logger.info(`   [2/4] Extrahiere Preise...`);
+        // Daten extrahieren
+        logger.info(`   [2/4] Extrahiere...`);
         const prices = {
             bitcoin: {
                 price_eur: parseFloat(data.RAW.BTC.EUR.PRICE.toFixed(2)),
@@ -67,13 +69,11 @@ export async function updateMarketPrices() {
 
         logger.info(`   ✅ BTC=${prices.bitcoin.price_eur}€, LTC=${prices.litecoin.price_eur}€, ETH=${prices.ethereum.price_eur}€`);
 
-        // === STEP 3: In market_cache schreiben (DIREKT!) ===
-        logger.info(`   [3/4] Schreibe in market_cache...`);
+        // In market_cache schreiben
+        logger.info(`   [3/4] DB Write...`);
         
         for (const [coinId, priceData] of Object.entries(prices)) {
-            logger.info(`      → ${coinId}...`);
-            
-            const { data: upsertData, error: upsertError } = await supabase
+            const { error } = await supabase
                 .from('market_cache')
                 .upsert({
                     coin_id: coinId,
@@ -81,22 +81,19 @@ export async function updateMarketPrices() {
                     change_24h: priceData.change_24h,
                     last_update: new Date().toISOString()
                 }, { 
-                    onConflict: 'coin_id',
-                    ignoreDuplicates: false
-                })
-                .select();
+                    onConflict: 'coin_id'
+                });
 
-            if (upsertError) {
-                logger.error(`      ❌ Upsert Error für ${coinId}:`, upsertError);
-                throw new Error(`DB Write Error: ${upsertError.message} (${upsertError.code})`);
+            if (error) {
+                logger.error(`      ❌ ${coinId} Error:`, error);
+                throw new Error(`DB Error: ${error.message}`);
             }
-
-            logger.info(`      ✅ ${coinId} geschrieben (${upsertData?.length || 0} rows)`);
         }
 
-        // === STEP 4: In price_history schreiben (SEPARAT!) ===
-        logger.info(`   [4/4] Speichere Historie...`);
-        
+        logger.info(`   ✅ DB geschrieben`);
+
+        // Historie speichern
+        logger.info(`   [4/4] Historie...`);
         const historyEntries = Object.entries(prices).map(([coinId, priceData]) => ({
             coin_id: coinId,
             price_eur: priceData.price_eur,
@@ -110,49 +107,34 @@ export async function updateMarketPrices() {
             .insert(historyEntries);
 
         if (historyError) {
-            // Historie ist optional - loggen aber nicht crashen
-            logger.warn(`   ⚠️ Historie-Write failed: ${historyError.message}`);
+            logger.warn(`   ⚠️ Historie failed: ${historyError.message}`);
         } else {
-            logger.info(`   ✅ Historie gespeichert (${historyEntries.length} entries)`);
+            logger.info(`   ✅ Historie OK`);
         }
 
-        // === VERIFY: Lesen zurück ===
-        logger.info(`   [VERIFY] Lese zurück aus DB...`);
-        const { data: verifyData, error: verifyError } = await supabase
-            .from('market_cache')
-            .select('coin_id, price_eur, last_update')
-            .order('coin_id');
+        // V0.23.2: Cache invalidieren!
+        memoryCache = null;
+        cacheTimestamp = null;
+        logger.info(`   🔄 Cache invalidiert`);
 
-        if (verifyError) {
-            logger.error(`   ❌ Verify failed:`, verifyError);
-        } else if (!verifyData || verifyData.length === 0) {
-            logger.error(`   ❌ DB ist leer nach Write!`);
-            throw new Error("Verify failed: DB leer");
-        } else {
-            logger.info(`   ✅ Verify OK: ${verifyData.length} coins in DB`);
-            verifyData.forEach(row => {
-                const ageMs = Date.now() - new Date(row.last_update).getTime();
-                logger.info(`      • ${row.coin_id}: ${row.price_eur}€ (${Math.floor(ageMs/1000)}s alt)`);
-            });
-        }
+        // Verify
+        const verifyData = await getMarketDataFromDB();
+        logger.info(`   ✅ Verify: ${Object.keys(verifyData).length} coins`);
 
-        // Reset Failures
         consecutiveFailures = 0;
         lastSuccessfulUpdate = new Date();
         
         logger.info(`✅ [Update #${updateAttempts}] ERFOLGREICH!`);
         logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
         
-        return await getMarketData();
+        return verifyData;
 
     } catch (err) {
         consecutiveFailures++;
-        logger.error(`❌ [Update #${updateAttempts}] FEHLGESCHLAGEN (${consecutiveFailures}x):`);
-        logger.error(`   Error: ${err.message}`);
-        logger.error(`   Stack: ${err.stack}`);
+        logger.error(`❌ [Update #${updateAttempts}] FAILED (${consecutiveFailures}x): ${err.message}`);
         
         if (consecutiveFailures >= 3) {
-            logger.warn(`⚠️ 3+ Fehler in Folge - schreibe Fallback`);
+            logger.warn(`⚠️ 3+ Fehler - Fallback`);
             await writeFallbackToDatabase();
         }
         
@@ -161,14 +143,14 @@ export async function updateMarketPrices() {
 }
 
 /**
- * Fallback: Schreibt statische Preise wenn API komplett down
+ * Fallback schreiben
  */
 async function writeFallbackToDatabase() {
     try {
-        logger.info("💾 Schreibe Fallback-Preise...");
+        logger.info("💾 Fallback...");
         
         for (const [coinId, data] of Object.entries(FALLBACK_PRICES)) {
-            const { error } = await supabase
+            await supabase
                 .from('market_cache')
                 .upsert({
                     coin_id: coinId,
@@ -176,74 +158,111 @@ async function writeFallbackToDatabase() {
                     change_24h: data.change24h,
                     last_update: new Date().toISOString()
                 }, { onConflict: 'coin_id' });
-
-            if (error) {
-                logger.error(`   ❌ Fallback ${coinId} Error:`, error);
-            } else {
-                logger.info(`   ✅ Fallback ${coinId} geschrieben`);
-            }
         }
         
-        logger.info("✅ Fallback komplett");
+        // Cache invalidieren
+        memoryCache = null;
+        cacheTimestamp = null;
+        
+        logger.info("✅ Fallback geschrieben");
     } catch (err) {
-        logger.error("❌ Kritischer Fallback-Fehler:", err);
+        logger.error("❌ Fallback Error:", err);
     }
 }
 
 /**
- * Marktdaten aus DB lesen
+ * V0.23.2: IMMER FRISCH aus DB lesen!
+ * Mit optionalem 10s Cache um DB-Load zu reduzieren
  */
-export async function getMarketData() {
+export async function getMarketData(bypassCache = false) {
     try {
-        const { data, error } = await supabase
-            .from('market_cache')
-            .select('*')
-            .order('coin_id');
-        
-        if (error) {
-            logger.error("❌ getMarketData DB-Error:", error);
-            return FALLBACK_PRICES;
-        }
-
-        if (!data || data.length === 0) {
-            logger.warn("⚠️ market_cache ist LEER!");
-            return FALLBACK_PRICES;
-        }
-
-        const formatted = {};
-        data.forEach(row => {
-            formatted[row.coin_id] = { 
-                price: parseFloat(row.price_eur), 
-                change24h: parseFloat(row.change_24h),
-                lastUpdate: row.last_update
-            };
-        });
-
-        // Age-Check
-        if (data[0]?.last_update) {
-            const ageMs = Date.now() - new Date(data[0].last_update).getTime();
-            const ageSec = Math.floor(ageMs / 1000);
+        // V0.23.2: Check Cache (nur wenn nicht bypassed)
+        if (!bypassCache && memoryCache && cacheTimestamp) {
+            const cacheAge = Date.now() - cacheTimestamp;
             
-            if (ageMs > 300000) {
-                logger.warn(`⚠️ Daten sind ${ageSec}s alt!`);
+            if (cacheAge < CACHE_TTL_MS) {
+                logger.debug(`📦 Cache hit (${Math.floor(cacheAge/1000)}s alt)`);
+                return memoryCache;
+            } else {
+                logger.debug(`🔄 Cache expired (${Math.floor(cacheAge/1000)}s alt)`);
             }
         }
 
-        return formatted;
+        // Frisch aus DB lesen
+        const data = await getMarketDataFromDB();
+        
+        // V0.23.2: In Cache speichern
+        memoryCache = data;
+        cacheTimestamp = Date.now();
+        logger.debug(`💾 Cache aktualisiert`);
+        
+        return data;
 
     } catch (err) {
-        logger.error("❌ getMarketData Exception:", err);
+        logger.error("❌ getMarketData Error:", err);
+        // Bei Fehler: Fallback, aber nicht cachen
         return FALLBACK_PRICES;
     }
 }
 
+/**
+ * V0.23.2: Direkt aus DB lesen (KEIN CACHE!)
+ */
+async function getMarketDataFromDB() {
+    const { data, error } = await supabase
+        .from('market_cache')
+        .select('*')
+        .order('coin_id');
+    
+    if (error) {
+        logger.error("❌ DB Read Error:", error);
+        throw error;
+    }
+
+    if (!data || data.length === 0) {
+        logger.warn("⚠️ market_cache LEER!");
+        throw new Error("market_cache ist leer");
+    }
+
+    const formatted = {};
+    data.forEach(row => {
+        formatted[row.coin_id] = { 
+            price: parseFloat(row.price_eur), 
+            change24h: parseFloat(row.change_24h),
+            lastUpdate: row.last_update
+        };
+    });
+
+    // Age-Check
+    if (data[0]?.last_update) {
+        const ageMs = Date.now() - new Date(data[0].last_update).getTime();
+        if (ageMs > 120000) { // > 2 Min
+            logger.warn(`⚠️ Daten ${Math.floor(ageMs/1000)}s alt!`);
+        }
+    }
+
+    return formatted;
+}
+
+/**
+ * Einzelner Coin-Preis
+ */
 export async function getCoinPrice(coinId) {
     const market = await getMarketData();
     return market[coinId.toLowerCase()] || FALLBACK_PRICES[coinId.toLowerCase()] || null;
 }
 
 /**
- * NEU: Preis-Historie abrufen (ohne RPC)
+ * V0.23.2: Cache manuell invalidieren
+ */
+export function invalidateCache() {
+    memoryCache = null;
+    cacheTimestamp = null;
+    logger.info("🔄 Cache manuell invalidiert");
+}
+
+/**
+ * Preis-Historie
  */
 export async function getPriceHistory(coinId, hours = 24) {
     try {
@@ -254,14 +273,10 @@ export async function getPriceHistory(coinId, hours = 24) {
             .gte('recorded_at', new Date(Date.now() - hours * 60 * 60 * 1000).toISOString())
             .order('recorded_at', { ascending: true });
 
-        if (error) {
-            logger.error("getPriceHistory Error:", error);
-            return [];
-        }
-        
+        if (error) throw error;
         return data || [];
     } catch (err) {
-        logger.error("getPriceHistory Exception:", err);
+        logger.error("getPriceHistory Error:", err);
         return [];
     }
 }
@@ -273,12 +288,15 @@ export function getMarketUpdateStatus() {
         consecutiveFailures,
         timeSinceUpdate: lastSuccessfulUpdate 
             ? Date.now() - lastSuccessfulUpdate.getTime() 
+            : null,
+        cacheAge: cacheTimestamp 
+            ? Date.now() - cacheTimestamp 
             : null
     };
 }
 
 /**
- * NEU: Debug-Info für Troubleshooting
+ * Debug-Info
  */
 export async function getMarketDebugInfo() {
     try {
@@ -287,16 +305,18 @@ export async function getMarketDebugInfo() {
             .select('*')
             .order('coin_id');
 
-        const { data: historyCount } = await supabase
+        const { count: historyCount } = await supabase
             .from('price_history')
-            .select('coin_id', { count: 'exact', head: true });
+            .select('*', { count: 'exact', head: true });
 
         const status = getMarketUpdateStatus();
 
         return {
             status,
             cache: cacheData || [],
-            historyEntries: historyCount?.length || 0,
+            historyEntries: historyCount || 0,
+            memoryCacheActive: memoryCache !== null,
+            memoryCacheAge: status.cacheAge,
             timestamp: new Date().toISOString()
         };
     } catch (err) {
@@ -306,7 +326,7 @@ export async function getMarketDebugInfo() {
 }
 
 // Initial-Fetch
-logger.info("🚀 market.js V0.23.1 geladen (DIRECT WRITE)");
+logger.info("🚀 market.js V0.23.2 geladen (FRESH DATA)");
 updateMarketPrices()
     .then(() => logger.info("✅ Initial-Fetch komplett"))
     .catch(e => logger.error("❌ Initial-Fetch Error:", e));
