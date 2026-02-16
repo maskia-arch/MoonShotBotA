@@ -1,5 +1,4 @@
-// logic/market.js - V0.23.2 - GARANTIERT FRISCHE DATEN
-import fetch from 'node-fetch';
+// logic/market.js - V1.0.0 - FIXED: AbortController + kein Modul-Scope-Fetch
 import { supabase } from '../supabase/client.js';
 import { logger } from '../utils/logger.js';
 
@@ -13,27 +12,36 @@ let lastSuccessfulUpdate = null;
 let updateAttempts = 0;
 let consecutiveFailures = 0;
 
-// V0.23.2: In-Memory Cache mit TTL
+// In-Memory Cache mit TTL
 let memoryCache = null;
 let cacheTimestamp = null;
 const CACHE_TTL_MS = 10000; // 10 Sekunden Cache
 
 /**
- * V0.23.2: Marktpreise aktualisieren
+ * FIX: Marktpreise aktualisieren mit AbortController (node-fetch v3 hat kein timeout!)
  */
 export async function updateMarketPrices() {
     updateAttempts++;
-    
+
     try {
         logger.info(`📊 [Update #${updateAttempts}] START`);
-        
-        // API Call
+
+        // FIX: AbortController statt timeout-Property
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
         logger.info(`   [1/4] API Call...`);
         const url = `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=BTC,LTC,ETH&tsyms=EUR`;
-        const response = await fetch(url, {
-            headers: { 'User-Agent': 'MoonShotBot/0.23.2' },
-            timeout: 15000
-        });
+
+        let response;
+        try {
+            response = await fetch(url, {
+                headers: { 'User-Agent': 'ValueTycoon/1.0.0' },
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -71,7 +79,7 @@ export async function updateMarketPrices() {
 
         // In market_cache schreiben
         logger.info(`   [3/4] DB Write...`);
-        
+
         for (const [coinId, priceData] of Object.entries(prices)) {
             const { error } = await supabase
                 .from('market_cache')
@@ -80,7 +88,7 @@ export async function updateMarketPrices() {
                     price_eur: priceData.price_eur,
                     change_24h: priceData.change_24h,
                     last_update: new Date().toISOString()
-                }, { 
+                }, {
                     onConflict: 'coin_id'
                 });
 
@@ -112,7 +120,7 @@ export async function updateMarketPrices() {
             logger.info(`   ✅ Historie OK`);
         }
 
-        // V0.23.2: Cache invalidieren!
+        // Cache invalidieren
         memoryCache = null;
         cacheTimestamp = null;
         logger.info(`   🔄 Cache invalidiert`);
@@ -123,21 +131,26 @@ export async function updateMarketPrices() {
 
         consecutiveFailures = 0;
         lastSuccessfulUpdate = new Date();
-        
+
         logger.info(`✅ [Update #${updateAttempts}] ERFOLGREICH!`);
-        logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-        
+
         return verifyData;
 
     } catch (err) {
         consecutiveFailures++;
-        logger.error(`❌ [Update #${updateAttempts}] FAILED (${consecutiveFailures}x): ${err.message}`);
-        
+
+        // FIX: AbortError erkennen
+        if (err.name === 'AbortError') {
+            logger.error(`❌ [Update #${updateAttempts}] TIMEOUT nach 15s (${consecutiveFailures}x)`);
+        } else {
+            logger.error(`❌ [Update #${updateAttempts}] FAILED (${consecutiveFailures}x): ${err.message}`);
+        }
+
         if (consecutiveFailures >= 3) {
             logger.warn(`⚠️ 3+ Fehler - Fallback`);
             await writeFallbackToDatabase();
         }
-        
+
         return await getMarketData();
     }
 }
@@ -148,7 +161,7 @@ export async function updateMarketPrices() {
 async function writeFallbackToDatabase() {
     try {
         logger.info("💾 Fallback...");
-        
+
         for (const [coinId, data] of Object.entries(FALLBACK_PRICES)) {
             await supabase
                 .from('market_cache')
@@ -159,11 +172,10 @@ async function writeFallbackToDatabase() {
                     last_update: new Date().toISOString()
                 }, { onConflict: 'coin_id' });
         }
-        
-        // Cache invalidieren
+
         memoryCache = null;
         cacheTimestamp = null;
-        
+
         logger.info("✅ Fallback geschrieben");
     } catch (err) {
         logger.error("❌ Fallback Error:", err);
@@ -171,49 +183,40 @@ async function writeFallbackToDatabase() {
 }
 
 /**
- * V0.23.2: IMMER FRISCH aus DB lesen!
- * Mit optionalem 10s Cache um DB-Load zu reduzieren
+ * Marktdaten abrufen mit optionalem Cache
  */
 export async function getMarketData(bypassCache = false) {
     try {
-        // V0.23.2: Check Cache (nur wenn nicht bypassed)
         if (!bypassCache && memoryCache && cacheTimestamp) {
             const cacheAge = Date.now() - cacheTimestamp;
-            
             if (cacheAge < CACHE_TTL_MS) {
-                logger.debug(`📦 Cache hit (${Math.floor(cacheAge/1000)}s alt)`);
+                logger.debug(`📦 Cache hit (${Math.floor(cacheAge / 1000)}s alt)`);
                 return memoryCache;
-            } else {
-                logger.debug(`🔄 Cache expired (${Math.floor(cacheAge/1000)}s alt)`);
             }
         }
 
-        // Frisch aus DB lesen
         const data = await getMarketDataFromDB();
-        
-        // V0.23.2: In Cache speichern
+
         memoryCache = data;
         cacheTimestamp = Date.now();
-        logger.debug(`💾 Cache aktualisiert`);
-        
+
         return data;
 
     } catch (err) {
         logger.error("❌ getMarketData Error:", err);
-        // Bei Fehler: Fallback, aber nicht cachen
         return FALLBACK_PRICES;
     }
 }
 
 /**
- * V0.23.2: Direkt aus DB lesen (KEIN CACHE!)
+ * Direkt aus DB lesen
  */
 async function getMarketDataFromDB() {
     const { data, error } = await supabase
         .from('market_cache')
         .select('*')
         .order('coin_id');
-    
+
     if (error) {
         logger.error("❌ DB Read Error:", error);
         throw error;
@@ -226,20 +229,12 @@ async function getMarketDataFromDB() {
 
     const formatted = {};
     data.forEach(row => {
-        formatted[row.coin_id] = { 
-            price: parseFloat(row.price_eur), 
+        formatted[row.coin_id] = {
+            price: parseFloat(row.price_eur),
             change24h: parseFloat(row.change_24h),
             lastUpdate: row.last_update
         };
     });
-
-    // Age-Check
-    if (data[0]?.last_update) {
-        const ageMs = Date.now() - new Date(data[0].last_update).getTime();
-        if (ageMs > 120000) { // > 2 Min
-            logger.warn(`⚠️ Daten ${Math.floor(ageMs/1000)}s alt!`);
-        }
-    }
 
     return formatted;
 }
@@ -253,7 +248,7 @@ export async function getCoinPrice(coinId) {
 }
 
 /**
- * V0.23.2: Cache manuell invalidieren
+ * Cache manuell invalidieren
  */
 export function invalidateCache() {
     memoryCache = null;
@@ -286,18 +281,15 @@ export function getMarketUpdateStatus() {
         lastUpdate: lastSuccessfulUpdate,
         attempts: updateAttempts,
         consecutiveFailures,
-        timeSinceUpdate: lastSuccessfulUpdate 
-            ? Date.now() - lastSuccessfulUpdate.getTime() 
+        timeSinceUpdate: lastSuccessfulUpdate
+            ? Date.now() - lastSuccessfulUpdate.getTime()
             : null,
-        cacheAge: cacheTimestamp 
-            ? Date.now() - cacheTimestamp 
+        cacheAge: cacheTimestamp
+            ? Date.now() - cacheTimestamp
             : null
     };
 }
 
-/**
- * Debug-Info
- */
 export async function getMarketDebugInfo() {
     try {
         const { data: cacheData } = await supabase
@@ -325,8 +317,6 @@ export async function getMarketDebugInfo() {
     }
 }
 
-// Initial-Fetch
-logger.info("🚀 market.js V0.23.2 geladen (FRESH DATA)");
-updateMarketPrices()
-    .then(() => logger.info("✅ Initial-Fetch komplett"))
-    .catch(e => logger.error("❌ Initial-Fetch Error:", e));
+// FIX: KEIN Initial-Fetch mehr im Modul-Scope!
+// Wird jetzt ausschließlich über main.js gesteuert.
+logger.info("🚀 market.js V1.0.0 geladen (NO auto-fetch)");

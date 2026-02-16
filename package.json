@@ -1,16 +1,23 @@
 {
-  "name": "moonshot-tycoon",
-  "version": "2.0.0",
+  "name": "valuetycoon",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Krypto-Trading Spiel für Telegram",
+  "description": "ValueTycoon - Krypto-Trading-Spiel als Telegram Mini App",
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
-    "dev": "node --watch main.js"
+    "server": "node server/index.js",
+    "dev": "node --watch main.js",
+    "dev:server": "node --watch server/index.js",
+    "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\""
   },
   "dependencies": {
     "telegraf": "^4.15.0",
     "@supabase/supabase-js": "^2.39.0",
-    "node-fetch": "^3.3.2"
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
   }
 }

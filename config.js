@@ -1,26 +1,36 @@
-// config.js - Zentrale Konfiguration für MoonShot Tycoon
+// config.js - V1.0.0 - ValueTycoon Konfiguration
 import { getVersion } from './utils/versionLoader.js';
 
 export const CONFIG = {
-    // Version & Bot-Grundlagen
+    // Version & Grundlagen
     VERSION: getVersion(),
-    TELEGRAM_TOKEN: process.env.BOT_TOKEN, 
+    TELEGRAM_TOKEN: process.env.BOT_TOKEN,
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_KEY: process.env.SUPABASE_KEY,
     PORT: process.env.PORT || 3000,
-    
-    // === WIRTSCHAFTS-BALANCE ===
+
+    // NEU: Web App URL (Telegram Mini App)
+    WEBAPP_URL: process.env.WEBAPP_URL || 'https://valuetycoon.app',
+    // NEU: API URL für den Express-Server
+    API_URL: process.env.API_URL || 'http://localhost:3001',
+    // NEU: API Port für Express-Server (separater Port)
+    API_PORT: process.env.API_PORT || 3001,
+
+    // NEU: Bot Notify Endpoint (für Server → Bot Push-Nachrichten)
+    BOT_NOTIFY_URL: process.env.BOT_NOTIFY_URL || 'http://localhost:3000/api/notify',
+
+    // Wirtschafts-Balance
     INITIAL_CASH: 10000,
-    TRADING_FEE: 0.005, // 0,5% pro Trade
-    MIN_VOL_FOR_REALESTATE: 30000, // Handelsvolumen für Immobilien
-    
-    // === ZEITSTEUERUNG ===
+    TRADING_FEE: 0.005,
+    MIN_VOL_FOR_REALESTATE: 30000,
+
+    // Zeitsteuerung
     SEASON_DURATION_DAYS: 30,
-    TICK_SPEED_MS: 3600000, // Wirtschafts-Tick alle 60 Min
-    MARKET_UPDATE_MS: 60000, // Markt-Preise alle 60 Sek
-    EVENT_CHECK_MS: 1800000, // Events alle 30 Min prüfen
-    
-    // === IMMOBILIEN-SYSTEM ===
+    TICK_SPEED_MS: 3600000,       // Wirtschafts-Tick alle 60 Min
+    MARKET_UPDATE_MS: 60000,      // Markt-Preise alle 60 Sek
+    EVENT_CHECK_MS: 1800000,      // Events alle 30 Min
+
+    // Immobilien
     PROPERTIES: {
         garage: {
             name: 'Garage in Berlin',
@@ -71,20 +81,20 @@ export const CONFIG = {
             tier: 6
         }
     },
-    
-    MAINTENANCE_CHANCE: 0.08, // 8% Chance pro Tick
+
+    MAINTENANCE_CHANCE: 0.08,
     RENT_CYCLE_HOURS: 24,
-    CONDITION_DECAY_RATE: 2, // 2% pro Monat ohne Wartung
-    
-    // === HEBEL-TRADING ===
+    CONDITION_DECAY_RATE: 2,
+
+    // Hebel-Trading
     LEVERAGE: {
         MIN: 2,
         MAX: 50,
         AVAILABLE: [2, 5, 10, 20, 50],
-        LIQUIDATION_THRESHOLD: 0.9 // 90% des Einsatzes
+        LIQUIDATION_THRESHOLD: 0.9
     },
-    
-    // === ACHIEVEMENTS ===
+
+    // Achievements
     ACHIEVEMENTS: {
         first_trade: {
             title: '🎯 Erster Trade',
@@ -112,47 +122,27 @@ export const CONFIG = {
             reward: 25000
         }
     },
-    
-    // === MARKT-EVENTS ===
-    MARKET_EVENTS: {
-        BULL_RUN: { multiplier: 1.15, probability: 0.1 },
-        CRASH: { multiplier: 0.82, probability: 0.08 },
-        SIDEWAYS: { multiplier: 1.02, probability: 0.15 },
-        WHALE_BUY: { multiplier: 1.08, probability: 0.12 },
-        FUD: { multiplier: 0.93, probability: 0.1 }
-    },
-    
-    // === API-EINSTELLUNGEN ===
+
+    // API
     CRYPTOCOMPARE_BASE_URL: 'https://min-api.cryptocompare.com/data',
     SUPPORTED_COINS: ['bitcoin', 'litecoin', 'ethereum'],
-    
-    // === UI & EMOJIS ===
+
+    // Emojis
     EMOJIS: {
-        CASH: '💶',
-        CRYPTO: '📈',
-        IMMO: '🏠',
-        MAINTENANCE: '🛠️',
-        ERROR: '🚨',
-        SUCCESS: '✅',
-        TREND_UP: '🟢',
-        TREND_DOWN: '🔴',
-        FIRE: '🔥',
-        ROCKET: '🚀',
-        WARNING: '⚠️',
-        CHART: '📊',
-        TROPHY: '🏆',
-        STAR: '⭐',
-        CROWN: '👑'
+        CASH: '💶', CRYPTO: '📈', IMMO: '🏠', MAINTENANCE: '🛠️',
+        ERROR: '🚨', SUCCESS: '✅', TREND_UP: '🟢', TREND_DOWN: '🔴',
+        FIRE: '🔥', ROCKET: '🚀', WARNING: '⚠️', CHART: '📊',
+        TROPHY: '🏆', STAR: '⭐', CROWN: '👑'
     },
-    
-    // === RANGLISTEN ===
+
+    // Ranglisten
     LEADERBOARD: {
         TOP_COUNT: 10,
-        PRIZE_POOL_PERCENT: 0.3 // 30% des Tax-Pools für Season-Ende
+        PRIZE_POOL_PERCENT: 0.3
     }
 };
 
-// Validierung beim Start
+// Validierung
 if (!CONFIG.TELEGRAM_TOKEN) {
     console.error("❌ FEHLER: BOT_TOKEN fehlt!");
     process.exit(1);

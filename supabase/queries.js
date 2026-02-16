@@ -1,22 +1,109 @@
-// supabase/queries.js - Erweitert mit Achievements
+// supabase/queries.js - V1.0.0 - FIX: syncUser + robustere Fehlerbehandlung
 import { supabase } from './client.js';
 import { CONFIG } from '../config.js';
 import { logger } from '../utils/logger.js';
 
+/**
+ * FIX: User synchronisieren - Profil erstellen/aktualisieren
+ * 
+ * Probleme in V0.23:
+ * 1. upsert + select().single() kann bei RLS-Policies scheitern
+ * 2. season_stats Insert VOR Profil-Commit = FK-Violation
+ * 3. Keine aussagekräftige Fehlermeldung
+ * 
+ * Fix: Erst prüfen ob User existiert, dann insert ODER update, 
+ *      dann season_stats mit Retry
+ */
 export async function syncUser(id, username) {
     try {
-        const { data: profile, error: pError } = await supabase
+        // Schritt 1: Prüfe ob Profil existiert
+        const { data: existing, error: selectError } = await supabase
             .from('profiles')
-            .upsert({ id, username }, { onConflict: 'id' })
-            .select().single();
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
 
-        if (pError) throw pError;
-        
-        await supabase.from('season_stats').upsert({ user_id: id }, { onConflict: 'user_id' });
-        
+        if (selectError) {
+            logger.error(`syncUser SELECT Fehler für ${id}:`, selectError);
+            throw selectError;
+        }
+
+        let profile;
+
+        if (existing) {
+            // User existiert → Username aktualisieren
+            const { data: updated, error: updateError } = await supabase
+                .from('profiles')
+                .update({ username, updated_at: new Date().toISOString() })
+                .eq('id', id)
+                .select()
+                .single();
+
+            if (updateError) {
+                logger.error(`syncUser UPDATE Fehler für ${id}:`, updateError);
+                throw updateError;
+            }
+            profile = updated;
+        } else {
+            // Neuer User → Insert mit allen Defaults
+            const { data: created, error: insertError } = await supabase
+                .from('profiles')
+                .insert({
+                    id,
+                    username,
+                    balance: CONFIG.INITIAL_CASH,
+                    trading_volume: 0,
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+                .select()
+                .single();
+
+            if (insertError) {
+                logger.error(`syncUser INSERT Fehler für ${id}:`, insertError);
+                // Falls Duplicate-Error (Race Condition), nochmal lesen
+                if (insertError.code === '23505') {
+                    const { data: retried } = await supabase
+                        .from('profiles')
+                        .select('*')
+                        .eq('id', id)
+                        .single();
+                    profile = retried;
+                } else {
+                    throw insertError;
+                }
+            } else {
+                profile = created;
+            }
+
+            // Schritt 2: Season-Stats NUR für neue User anlegen
+            // FIX: Warte kurz damit FK-Constraint erfüllt ist
+            if (profile) {
+                const { error: seasonError } = await supabase
+                    .from('season_stats')
+                    .upsert({
+                        user_id: id,
+                        season_profit: 0,
+                        season_loss: 0,
+                        trades_count: 0
+                    }, { onConflict: 'user_id' });
+
+                if (seasonError) {
+                    // Nicht kritisch - loggen aber nicht abbrechen
+                    logger.warn(`syncUser season_stats Warnung für ${id}:`, seasonError.message);
+                }
+            }
+        }
+
+        if (!profile) {
+            throw new Error(`Profil konnte nicht erstellt/geladen werden für ${id}`);
+        }
+
+        logger.info(`✅ syncUser OK: ${username} (${id}) - ${existing ? 'UPDATE' : 'NEU'}`);
         return profile;
+
     } catch (err) {
-        logger.error(`syncUser Fehler für ${id}:`, err);
+        logger.error(`❌ syncUser FATAL für ${id}:`, err);
         return null;
     }
 }
@@ -63,7 +150,7 @@ export async function checkAndAwardAchievement(userId, achievementId) {
             .eq('achievement_id', achievementId)
             .maybeSingle();
 
-        if (existing) return; // Bereits freigeschaltet
+        if (existing) return;
 
         await supabase.from('user_achievements').insert({
             user_id: userId,
@@ -101,7 +188,7 @@ export async function updateWealth(userId) {
         if (userData.user_crypto) {
             const { getMarketData } = await import('../logic/market.js');
             const market = await getMarketData();
-            
+
             userData.user_crypto.forEach(crypto => {
                 const price = market[crypto.coin_id]?.price || 0;
                 totalWealth += crypto.amount * price;

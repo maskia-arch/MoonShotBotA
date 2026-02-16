@@ -1,21 +1,23 @@
-// main.js - V0.23.6 - SUPER SIMPLE AUTO-UPDATE
+// main.js - V1.0.0 - ValueTycoon Bot (Launcher + Push Notifications)
+// Der Bot ist NUR noch Startmodul + Benachrichtigungs-Sender.
+// Alle Spiellogik läuft in der Web App.
 import { Telegraf, session } from 'telegraf';
-import http from 'http'; 
+import http from 'http';
 import { CONFIG } from './config.js';
 import { logger } from './utils/logger.js';
-import { handleStart } from './commands/start.js';
-import { showTradeMenu, handleBuy, handleSell, initiateTradeInput, handleLeverageTrade } from './commands/trade.js';
-import { showImmoMarket, handleBuyProperty, handlePropertyDetails, handleSellProperty, handleUpgradeProperty } from './commands/immo.js';
-import { showWallet, showTransactionHistory } from './commands/wallet.js';
-import { showCryptoWallet, showCoinDetails, quickSellFromWallet } from './commands/cryptoWallet.js';
-import { showLeaderboard } from './commands/rank.js';
-import { showAchievements } from './commands/achievements.js';
+import { syncUser } from './supabase/queries.js';
 import { getVersion } from './utils/versionLoader.js';
-import { mainKeyboard } from './ui/buttons.js';
-import { updateMarketPrices, getMarketDebugInfo, getMarketUpdateStatus, invalidateCache } from './logic/market.js';
+import { updateMarketPrices, invalidateCache, getMarketUpdateStatus, getMarketDebugInfo } from './logic/market.js';
+import { startGlobalScheduler, stopAllSchedulers } from './core/scheduler.js';
+import { Markup } from 'telegraf';
 
 if (!CONFIG.TELEGRAM_TOKEN) {
     logger.error("BOT_TOKEN fehlt!");
+    process.exit(1);
+}
+
+if (!CONFIG.WEBAPP_URL) {
+    logger.error("WEBAPP_URL fehlt! Setze WEBAPP_URL in .env");
     process.exit(1);
 }
 
@@ -25,240 +27,134 @@ bot.use(session());
 let isShuttingDown = false;
 let server = null;
 
-// === SUPER SIMPLE AUTO-UPDATE STATE ===
-let autoUpdateRunning = false;
-let autoUpdateCount = 0;
-
-// === AUTO-UPDATE LOOP (60s) ===
-async function autoUpdateLoop() {
-    if (!autoUpdateRunning || isShuttingDown) {
-        logger.info("⏹️ Auto-Update gestoppt");
-        return;
-    }
-    
-    try {
-        autoUpdateCount++;
-        logger.info(`🔄 [AUTO-UPDATE #${autoUpdateCount}] START`);
-        
-        // Das gleiche wie /forceupdate!
-        invalidateCache();
-        await updateMarketPrices();
-        
-        logger.info(`✅ [AUTO-UPDATE #${autoUpdateCount}] DONE`);
-    } catch (err) {
-        logger.error(`❌ [AUTO-UPDATE #${autoUpdateCount}] Error: ${err.message}`);
-    }
-    
-    // REKURSIV - nächster Update in 60s
-    if (autoUpdateRunning && !isShuttingDown) {
-        setTimeout(autoUpdateLoop, 60000); // 60 Sekunden
-        logger.debug(`⏰ Nächster Auto-Update in 60s`);
-    }
-}
-
-// === START AUTO-UPDATE ===
-function startAutoUpdate() {
-    if (autoUpdateRunning) {
-        logger.warn("⚠️ Auto-Update läuft bereits!");
-        return;
-    }
-    
-    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    logger.info("⏰ STARTE AUTO-UPDATE V0.23.6");
-    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
-    autoUpdateRunning = true;
-    autoUpdateCount = 0;
-    
-    // Start SOFORT
-    logger.info("🚀 Starte Auto-Update-Loop (60s interval)...");
-    autoUpdateLoop();
-    
-    logger.info("✅ AUTO-UPDATE GESTARTET!");
-    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-}
-
-// === STOP AUTO-UPDATE ===
-function stopAutoUpdate() {
-    logger.info("⏸️ Stoppe Auto-Update...");
-    autoUpdateRunning = false;
-    logger.info("✅ Auto-Update gestoppt");
-}
-
-// === INTERFACE HANDLER ===
-bot.use(async (ctx, next) => {
+// =======================================================
+// === /start - User anlegen + Web App Button anzeigen ===
+// =======================================================
+bot.command('start', async (ctx) => {
     if (isShuttingDown) return;
-    if (ctx.from && !ctx.session) ctx.session = {};
 
-    ctx.sendInterface = async (text, extra = {}) => {
-        const lastId = ctx.session?.lastMessageId;
-        
-        if (lastId) {
-            try {
-                return await ctx.telegram.editMessageText(
-                    ctx.chat.id, lastId, null, text, {
-                        parse_mode: 'Markdown',
-                        ...extra
-                    }
-                );
-            } catch (e) {
-                try {
-                    await ctx.telegram.deleteMessage(ctx.chat.id, lastId).catch(() => {});
-                } catch (delErr) {}
+    const userId = ctx.from.id;
+    const firstName = ctx.from.first_name || 'Spieler';
+    const username = ctx.from.username || firstName;
+
+    try {
+        await ctx.sendChatAction('typing');
+
+        // User synchronisieren (FIX: neue syncUser-Logik)
+        const userData = await syncUser(userId, username);
+
+        if (!userData) {
+            return ctx.reply("🚨 Verbindungsproblem. Versuch es gleich nochmal.");
+        }
+
+        // Prüfen ob neuer User (innerhalb letzter 15s erstellt)
+        const isNewUser = Date.now() - new Date(userData.created_at).getTime() < 15000;
+
+        if (isNewUser) {
+            // Willkommensbrief
+            const welcomeMsg = `
+✉️ *EIN BRIEF AUS DER TOSKANA*
+━━━━━━━━━━━━━━━━━━━━
+
+Mein lieber ${firstName},
+
+die Luft hier ist herrlich, aber mein altes Händlerherz ist unruhig. Ich habe dir *10.000 €* überwiesen.
+
+Die Welt der Coins ist wild – pass auf, dass du nicht alles verhebelst. Wenn du klug bist, sicherst du deine Gewinne in Steinen und Mörtel.
+
+Enttäusche mich nicht!
+
+_Dein Onkel Willi_
+━━━━━━━━━━━━━━━━━━━━
+`;
+            await ctx.reply(welcomeMsg, { parse_mode: 'Markdown' });
+            logger.info(`🆕 Neuer Spieler: ${username} (${userId})`);
+        } else {
+            await ctx.reply(
+                `👋 *Willkommen zurück, ${firstName}!*\n\nDer Markt wartet auf dich.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+
+        // Web App Button
+        await ctx.reply(
+            "🚀 *ValueTycoon* – Dein Krypto-Trading-Spiel\n\nÖffne das Spiel über den Button unten:",
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.webApp('🎮 Spiel öffnen', CONFIG.WEBAPP_URL)],
+                    [Markup.button.callback('📊 Markt-Status', 'market_status')]
+                ])
             }
-        }
-
-        try {
-            const msg = await ctx.reply(text, { 
-                parse_mode: 'Markdown', 
-                ...extra 
-            });
-            ctx.session.lastMessageId = msg.message_id;
-            return msg;
-        } catch (e) {
-            logger.error("Interface Error:", e);
-        }
-    };
-    
-    await next();
-});
-
-// === AUTO-CLEANUP ===
-bot.on('text', async (ctx, next) => {
-    if (isShuttingDown) return;
-
-    try {
-        await ctx.deleteMessage().catch(() => {});
-    } catch (e) {}
-
-    const menuCommands = [
-        '📈 Trading Center', '💰 Mein Portfolio', 
-        '🏠 Immobilien', '🏆 Bestenliste',
-        '⭐ Achievements'
-    ];
-    
-    if (ctx.message.text.startsWith('/') || menuCommands.includes(ctx.message.text)) {
-        delete ctx.session.activeTrade;
-        invalidateCache();
-        return next();
-    }
-
-    if (!ctx.session?.activeTrade) return next();
-
-    const amount = parseFloat(ctx.message.text.replace(',', '.'));
-    const { coinId, type, leverage } = ctx.session.activeTrade;
-
-    if (isNaN(amount) || amount <= 0) {
-        const errorMsg = await ctx.reply(`🚨 Ungültige Anzahl`);
-        setTimeout(() => 
-            ctx.telegram.deleteMessage(ctx.chat.id, errorMsg.message_id).catch(() => {}), 
-            3000
         );
-        return;
-    }
 
-    if (leverage && leverage > 1) {
-        await handleLeverageTrade(ctx, coinId, amount, leverage);
-    } else if (type === 'buy') {
-        await handleBuy(ctx, coinId, amount);
-    } else if (type === 'sell') {
-        await handleSell(ctx, coinId, amount);
+    } catch (err) {
+        logger.error("Start-Command Error:", err);
+        await ctx.reply("🚨 Verbindungsproblem. Versuch es gleich nochmal.");
     }
-    
-    delete ctx.session.activeTrade;
-    invalidateCache();
 });
 
-// === ERROR HANDLING ===
-bot.catch((err, ctx) => {
-    if (err.description?.includes("message to delete not found") || 
-        err.description?.includes("message is not modified")) return;
-    
-    if (err.description?.includes("409")) {
-        logger.error("🚨 409 CONFLICT!");
-        gracefulShutdown('409');
-        return;
-    }
-    
-    logger.error(`Error:`, err);
-});
-
-// === COMMANDS ===
-bot.command('start', (ctx) => {
+// =======================================================
+// === /play - Schnellstart für Web App                ===
+// =======================================================
+bot.command('play', async (ctx) => {
     if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    invalidateCache();
-    return handleStart(ctx);
+
+    await ctx.reply(
+        "🎮 *ValueTycoon öffnen:*",
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.webApp('🚀 Jetzt spielen', CONFIG.WEBAPP_URL)]
+            ])
+        }
+    );
 });
 
-// STATUS (FIX: Kein Markdown für Emojis!)
+// =======================================================
+// === Admin-Commands (Status, Debug, Force-Update)    ===
+// =======================================================
 bot.command('status', async (ctx) => {
     try {
         const marketStatus = getMarketUpdateStatus();
 
-        let msg = `BOT STATUS V0.23.6\n`;
+        let msg = `BOT STATUS V${getVersion()}\n`;
         msg += `================================\n\n`;
-        
-        msg += `Auto-Update:\n`;
-        msg += `Status: ${autoUpdateRunning ? 'AKTIV' : 'INAKTIV'}\n`;
-        msg += `Count: ${autoUpdateCount}\n`;
-        msg += `\n`;
 
         msg += `Markt-Updates:\n`;
         msg += `Gesamt: ${marketStatus.attempts}\n`;
         msg += `Failures: ${marketStatus.consecutiveFailures}\n`;
-        
+
         if (marketStatus.lastUpdate) {
             const ageMin = Math.floor(marketStatus.timeSinceUpdate / 60000);
             const ageSec = Math.floor((marketStatus.timeSinceUpdate % 60000) / 1000);
             msg += `Letzter: ${marketStatus.lastUpdate.toLocaleTimeString('de-DE')}\n`;
             msg += `Alter: ${ageMin}min ${ageSec}s\n`;
-            
-            if (ageMin > 2) {
-                msg += `STATUS: PROBLEM (zu alt)\n`;
-            } else {
-                msg += `STATUS: OK\n`;
-            }
+            msg += `STATUS: ${ageMin > 2 ? 'PROBLEM (zu alt)' : 'OK'}\n`;
         } else {
             msg += `STATUS: NIE erfolgreich\n`;
         }
-        msg += `\n`;
 
-        msg += `Bot:\n`;
-        msg += `Version: ${getVersion()}\n`;
-        msg += `Uptime: ${Math.floor(process.uptime() / 60)}min\n`;
-        msg += `\n${new Date().toLocaleString('de-DE')}`;
+        msg += `\nUptime: ${Math.floor(process.uptime() / 60)}min\n`;
+        msg += `${new Date().toLocaleString('de-DE')}`;
 
-        // KEIN parse_mode!
         await ctx.reply(msg);
-
     } catch (err) {
         logger.error("Status Error:", err);
         await ctx.reply(`Error: ${err.message}`);
     }
 });
 
-// DEBUG (FIX: Kein Markdown!)
 bot.command('debug', async (ctx) => {
     try {
         const debugInfo = await getMarketDebugInfo();
         const status = getMarketUpdateStatus();
 
-        let msg = `MARKET DEBUG V0.23.6\n`;
+        let msg = `MARKET DEBUG V${getVersion()}\n`;
         msg += `================================\n\n`;
-        
-        msg += `Status:\n`;
         msg += `Updates: ${status.attempts}\n`;
         msg += `Failures: ${status.consecutiveFailures}\n`;
-        msg += `Letzter: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n`;
-        if (status.timeSinceUpdate) {
-            msg += `Alter: ${Math.floor(status.timeSinceUpdate / 1000)}s\n`;
-        }
-        msg += `\n`;
-
-        msg += `Cache:\n`;
-        msg += `Aktiv: ${debugInfo.memoryCacheActive ? 'JA' : 'NEIN'}\n`;
-        msg += `\n`;
+        msg += `Letzter: ${status.lastUpdate ? status.lastUpdate.toLocaleString('de-DE') : 'NIE'}\n\n`;
 
         msg += `market_cache:\n`;
         if (debugInfo.cache && debugInfo.cache.length > 0) {
@@ -269,21 +165,15 @@ bot.command('debug', async (ctx) => {
         } else {
             msg += `LEER\n`;
         }
-        msg += `\n`;
+        msg += `\nHistorie: ${debugInfo.historyEntries || 0} Eintraege`;
 
-        msg += `History: ${debugInfo.historyEntries || 0} Eintraege\n`;
-        msg += `\n${new Date().toLocaleString('de-DE')}`;
-
-        // KEIN parse_mode!
         await ctx.reply(msg);
-
     } catch (err) {
         logger.error("Debug Error:", err);
         await ctx.reply(`Error: ${err.message}`);
     }
 });
 
-// FORCE UPDATE
 bot.command('forceupdate', async (ctx) => {
     try {
         await ctx.reply("Force Update laeuft...");
@@ -291,218 +181,99 @@ bot.command('forceupdate', async (ctx) => {
         await updateMarketPrices();
         await ctx.reply("Done!");
     } catch (err) {
-        logger.error("Force-Update Error:", err);
         await ctx.reply(`Error: ${err.message}`);
     }
 });
 
-// RESTART AUTO-UPDATE
-bot.command('restart', async (ctx) => {
-    try {
-        await ctx.reply("Restart Auto-Update...");
-        stopAutoUpdate();
-        
-        setTimeout(() => {
-            startAutoUpdate();
-            ctx.reply("Neu gestartet!");
-        }, 2000);
-    } catch (err) {
-        logger.error("Restart Error:", err);
-        await ctx.reply(`Error: ${err.message}`);
-    }
-});
-
-bot.command('clearcache', async (ctx) => {
-    try {
-        invalidateCache();
-        await ctx.reply("Cache geleert!");
-    } catch (err) {
-        await ctx.reply(`Error: ${err.message}`);
-    }
-});
-
-bot.hears('📈 Trading Center', (ctx) => {
-    if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    invalidateCache();
-    return showTradeMenu(ctx);
-});
-
-bot.hears('💰 Mein Portfolio', (ctx) => {
-    if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    invalidateCache();
-    return showWallet(ctx);
-});
-
-bot.hears('🏠 Immobilien', (ctx) => {
-    if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    return showImmoMarket(ctx);
-});
-
-bot.hears('🏆 Bestenliste', (ctx) => {
-    if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    return showLeaderboard(ctx, 'wealth');
-});
-
-bot.hears('⭐ Achievements', (ctx) => {
-    if (isShuttingDown) return;
-    delete ctx.session.activeTrade;
-    return showAchievements(ctx);
-});
-
-// === CALLBACKS (gekürzt - wie vorher) ===
+// =======================================================
+// === Callback-Queries                                 ===
+// =======================================================
 bot.on('callback_query', async (ctx) => {
-    if (isShuttingDown) {
-        await ctx.answerCbQuery("Restart...").catch(() => {});
+    if (isShuttingDown) return;
+
+    const action = ctx.callbackQuery.data;
+
+    try {
+        if (action === 'market_status') {
+            const status = getMarketUpdateStatus();
+            const msg = status.lastUpdate
+                ? `📊 Letztes Update: vor ${Math.floor(status.timeSinceUpdate / 1000)}s\n✅ System läuft`
+                : `⚠️ Noch kein Update`;
+            await ctx.answerCbQuery(msg, { show_alert: true });
+        } else {
+            await ctx.answerCbQuery();
+        }
+    } catch (err) {
+        logger.error("Callback Error:", err);
+        await ctx.answerCbQuery("Fehler").catch(() => {});
+    }
+});
+
+// =======================================================
+// === Error Handling                                   ===
+// =======================================================
+bot.catch((err, ctx) => {
+    if (err.description?.includes("message to delete not found") ||
+        err.description?.includes("message is not modified")) return;
+
+    if (err.description?.includes("409")) {
+        logger.error("🚨 409 CONFLICT!");
+        gracefulShutdown('409');
         return;
     }
 
-    const action = ctx.callbackQuery.data;
-    
-    try {
-        const cacheInvalidatingActions = [
-            'open_trading_center',
-            'refresh_wallet',
-            'port_crypto',
-            'wallet_overview'
-        ];
-        
-        if (cacheInvalidatingActions.includes(action) || action.startsWith('view_coin_')) {
-            invalidateCache();
-        }
-
-        if (action === 'main_menu') {
-            delete ctx.session.activeTrade;
-            invalidateCache();
-            await ctx.sendInterface("Hauptmenue", mainKeyboard);
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'open_trading_center') {
-            delete ctx.session.activeTrade;
-            await showTradeMenu(ctx);
-            return ctx.answerCbQuery();
-        }
-        
-        if (action.startsWith('view_coin_')) {
-            await showTradeMenu(ctx, action.split('_')[2]);
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('trade_buy_') || action.startsWith('trade_sell_')) {
-            const parts = action.split('_');
-            await initiateTradeInput(ctx, parts[2], parts[1]);
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('trade_leverage_')) {
-            const { showLeverageMenu } = await import('./commands/trade.js');
-            await showLeverageMenu(ctx, action.replace('trade_leverage_', ''));
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('set_lev_')) {
-            const parts = action.split('_');
-            await initiateTradeInput(ctx, parts[2], 'buy', parseInt(parts[3]));
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'wallet_overview' || action === 'refresh_wallet') {
-            await showCryptoWallet(ctx);
-            return ctx.answerCbQuery(action === 'refresh_wallet' ? 'Aktualisiert!' : '');
-        }
-
-        if (action.startsWith('wallet_coin_')) {
-            await showCoinDetails(ctx, action.replace('wallet_coin_', ''));
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('quick_sell_')) {
-            const parts = action.split('_');
-            await quickSellFromWallet(ctx, parts[2], parseInt(parts[3]));
-            return;
-        }
-
-        if (action.startsWith('buy_immo_')) {
-            await handleBuyProperty(ctx, action.replace('buy_immo_', ''));
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('info_immo_')) {
-            await handlePropertyDetails(ctx, action.replace('info_immo_', ''));
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('sell_immo_')) {
-            await handleSellProperty(ctx, parseInt(action.replace('sell_immo_', '')));
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('upgrade_immo_')) {
-            await handleUpgradeProperty(ctx, parseInt(action.replace('upgrade_immo_', '')));
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'view_history') {
-            await showTransactionHistory(ctx);
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'port_crypto') {
-            await showCryptoWallet(ctx);
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'port_immo') {
-            await showWallet(ctx, 'immo');
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'port_all') {
-            await showWallet(ctx, 'all');
-            return ctx.answerCbQuery();
-        }
-
-        if (action.startsWith('rank_')) {
-            await showLeaderboard(ctx, action.replace('rank_', ''));
-            return ctx.answerCbQuery();
-        }
-
-        if (action === 'view_achievements') {
-            await showAchievements(ctx);
-            return ctx.answerCbQuery();
-        }
-
-        await ctx.answerCbQuery();
-    } catch (err) {
-        logger.error("Callback Error:", err);
-        try {
-            await ctx.answerCbQuery("Fehler");
-        } catch (e) {}
-    }
+    logger.error(`Bot Error:`, err);
 });
 
-// === GRACEFUL SHUTDOWN ===
+// =======================================================
+// === Push Notifications (export für Server-API)       ===
+// =======================================================
+export async function sendPushNotification(userId, message) {
+    try {
+        await bot.telegram.sendMessage(userId, message, { parse_mode: 'Markdown' });
+        return true;
+    } catch (err) {
+        logger.error(`Push an ${userId} fehlgeschlagen:`, err.message);
+        return false;
+    }
+}
+
+export async function broadcastMessage(message) {
+    try {
+        const { supabase } = await import('./supabase/client.js');
+        const { data: profiles } = await supabase.from('profiles').select('id').limit(500);
+        if (!profiles) return 0;
+
+        let sent = 0;
+        for (const profile of profiles) {
+            const ok = await sendPushNotification(profile.id, message);
+            if (ok) sent++;
+        }
+        return sent;
+    } catch (err) {
+        logger.error("Broadcast Error:", err);
+        return 0;
+    }
+}
+
+// =======================================================
+// === Graceful Shutdown                                ===
+// =======================================================
 async function gracefulShutdown(reason = 'unknown') {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    
+
     logger.info(`Shutdown (${reason})`);
 
     try {
-        stopAutoUpdate();
+        stopAllSchedulers();
         await new Promise(resolve => setTimeout(resolve, 2000));
         await bot.stop(reason);
-        
+
         if (server) {
-            await new Promise((resolve) => {
-                server.close(() => resolve());
-            });
+            await new Promise((resolve) => server.close(() => resolve()));
         }
-        
+
         logger.info("Shutdown komplett");
         process.exit(0);
     } catch (err) {
@@ -511,12 +282,14 @@ async function gracefulShutdown(reason = 'unknown') {
     }
 }
 
-// === LAUNCH ===
+// =======================================================
+// === Launch                                           ===
+// =======================================================
 async function launch() {
     try {
-        logger.info("MoonShot Tycoon v0.23.6 (SUPER SIMPLE AUTO-UPDATE)");
-        logger.info("Warte 10s...");
-        await new Promise(resolve => setTimeout(resolve, 10000));
+        logger.info(`ValueTycoon Bot V${getVersion()} (Launcher + Scheduler)`);
+        logger.info("Warte 5s...");
+        await new Promise(resolve => setTimeout(resolve, 5000));
 
         logger.info("Starte Bot...");
         await bot.launch({
@@ -524,14 +297,17 @@ async function launch() {
             allowedUpdates: ['message', 'callback_query']
         });
 
+        // FIX: Ein einziger initialer Markt-Fetch
         logger.info("Initial Marktdaten...");
         await updateMarketPrices();
-        
-        logger.info("Starte Auto-Update (60s)...");
-        startAutoUpdate();
-        
-        console.log(`v${getVersion()} ONLINE`);
-        console.log(`Commands: /status /debug /forceupdate /restart`);
+
+        // FIX: Scheduler starten (STATT eigenem Loop in main.js)
+        logger.info("Starte Scheduler...");
+        startGlobalScheduler(bot);
+
+        console.log(`ValueTycoon Bot v${getVersion()} ONLINE`);
+        console.log(`Web App: ${CONFIG.WEBAPP_URL}`);
+        console.log(`Commands: /start /play /status /debug /forceupdate`);
 
     } catch (err) {
         if (err.description?.includes("409")) {
@@ -544,28 +320,52 @@ async function launch() {
     }
 }
 
-// === HTTP SERVER ===
+// =======================================================
+// === HTTP Server (Health-Check + Push-API)            ===
+// =======================================================
 const port = CONFIG.PORT || 3000;
-server = http.createServer((req, res) => {
+server = http.createServer(async (req, res) => {
+    // CORS Headers für Web App
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        return res.end();
+    }
+
     if (req.url === '/health') {
         res.writeHead(isShuttingDown ? 503 : 200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: isShuttingDown ? 'shutting_down' : 'healthy',
             version: getVersion(),
-            uptime: process.uptime(),
-            autoUpdate: autoUpdateRunning
+            uptime: process.uptime()
         }));
+    } else if (req.url === '/api/notify' && req.method === 'POST') {
+        // Push-API für die Web App
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const { userId, message } = JSON.parse(body);
+                const ok = await sendPushNotification(userId, message);
+                res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: ok }));
+            } catch (err) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
     } else {
         res.writeHead(200);
-        res.end('MoonShot Tycoon v0.23.6');
+        res.end(`ValueTycoon Bot v${getVersion()}`);
     }
 });
 
-server.listen(port, () => {
-    logger.info(`HTTP Server: Port ${port}`);
-});
+server.listen(port, () => logger.info(`HTTP Server: Port ${port}`));
 
-// === SIGNALS ===
+// Signals
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
